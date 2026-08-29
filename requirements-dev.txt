@@ -1,0 +1,17 @@
+# Toolchain for developing and testing the CompiledPolicy primitive.
+#
+# REQUIRES PYTHON 3.12+ (genlayer-test publishes no build for 3.11 or earlier).
+#
+#   python3.12 -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements-dev.txt
+#
+# Versions are pinned exactly to the ones the recorded results were produced
+# with: 66 direct-mode tests, 6 Studionet integration tests, and both
+# `genvm-lint check` runs. Newer genvm releases changed the runner layout that
+# both tools use to resolve an SDK -- see DECISIONS.md, "direct-mode SDK
+# resolution" -- so a floating version is not reproducible here.
+#
+# The contracts themselves have NO dependencies. They are single-file GenVM
+# programs whose only import is `from genlayer import *`, provided by the runner.
+genlayer-test==0.29.2
+genvm-linter==0.11.0

@@ -1,0 +1,17 @@
+# Networks for the integration suite (tests/integration). The direct-mode suite
+# needs none of this.
+#
+# To run against a testnet, add an account entry and set the variable in .env:
+#   testnet_asimov:
+#     accounts: ["${ACCOUNT_PRIVATE_KEY_1}"]
+#     from: "${ACCOUNT_PRIVATE_KEY_1}"
+networks:
+  default: studionet
+  studionet: {}
+  localnet:
+    url: "http://127.0.0.1:4000/api"
+    leader_only: false
+
+paths:
+  contracts: "contracts"
+  artifacts: "artifacts"
