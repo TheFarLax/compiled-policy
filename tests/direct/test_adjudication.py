@@ -3,18 +3,24 @@
 The second consensus round exists because some clauses genuinely cannot be
 mechanised. What matters is that it is *narrow*: it only ever runs when the
 mechanised half already passed, it is told the mechanised results as ground
-truth, and its ruling is recorded against the policy digest it was decided
-under.
+truth, its ruling is recorded against the policy digest it was decided under,
+and -- the property this file exists to prove -- the text it judges is the
+immutable clause prose, never anything the compiler wrote.
 """
 
 import json
+import re
 
 import pytest
 
-from conftest import FAITHFUL, GOOD, TOO_SHORT
+from conftest import CLAUSES, FAITHFUL, GOOD, TOO_SHORT
 
 COMPILE_PROMPT = r"compiling a rule"
 RULE_PROMPT = r"ruling on the clauses"
+
+# The one clause the faithful compilation leaves residual, verbatim from the
+# immutable rule. This exact string is what must reach the adjudicator.
+TONE_CLAUSE = CLAUSES[3]
 
 # Clause 4 mechanised instead of residual, so the "nothing to adjudicate" branch
 # is reachable. Still satisfies every acceptance vector.
@@ -148,7 +154,7 @@ def test_validator_rejects_a_malformed_leader_ruling(direct_vm, compiled):
 # ----------------------------------------------------------- digest binding
 def test_a_ruling_does_not_survive_a_new_mechanisation(direct_vm, compiled):
     """The ruling was made about a specific compiled program. Recompiling means
-    the question may no longer be the same question, so the old ruling must not
+    the clause set it covered may no longer be the same, so the old ruling must not
     keep authorising anything."""
     direct_vm.mock_llm(RULE_PROMPT, ruling(True))
     compiled.adjudicate(json.dumps(GOOD))
@@ -170,3 +176,32 @@ def test_a_ruling_does_not_survive_a_new_mechanisation(direct_vm, compiled):
 def test_ruling_for_reports_no_ruling_and_bad_payloads(compiled):
     assert json.loads(compiled.ruling_for(json.dumps(GOOD)))["verdict"] == "NO_RULING"
     assert json.loads(compiled.ruling_for("nope"))["verdict"] == "INVALID_PAYLOAD"
+
+
+# ------------------------------------------------ binding to the immutable rule
+def test_adjudication_judges_the_immutable_clause_text(direct_vm, compiled):
+    """The binding, demonstrated rather than asserted.
+
+    Two mocks are registered in order. The first matches only if the immutable
+    clause prose appears in the prompt; the second is a catch-all that answers
+    the opposite way. Direct mode matches mocks first-registered-first, so a
+    PASS here can only mean the clause text reached the model."""
+    direct_vm.mock_llm(re.escape(TONE_CLAUSE), ruling(True))
+    direct_vm.mock_llm(r".*", ruling(False))
+
+    result = json.loads(compiled.adjudicate(json.dumps(GOOD)))
+    assert result["verdict"] == "PASS"
+    assert result["rulings"] == [{"id": "4", "satisfied": True}]
+
+
+def test_a_substituted_question_never_reaches_the_adjudicator(direct_vm, compiled):
+    """The negative half of the same claim, and the shape of the rejected flaw.
+
+    A mock is registered for the wording a leader would once have been able to
+    smuggle in. It is never hit, so the catch-all answers instead and the verdict
+    is FAIL -- proving the substituted question is nowhere in the prompt."""
+    direct_vm.mock_llm(re.escape("Is the submission non-empty?"), ruling(True))
+    direct_vm.mock_llm(r".*", ruling(False))
+
+    result = json.loads(compiled.adjudicate(json.dumps(GOOD)))
+    assert result["verdict"] == "FAIL"

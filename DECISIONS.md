@@ -6,6 +6,169 @@ Newest first. Not a changelog; git history covers that.
 
 ---
 
+## 2026-08-30 -- the residual-binding fix verified live; previous deployment superseded
+
+**Result.** The fixed contract was deployed fresh to Studionet and the complete
+lifecycle passed. Three consecutive full integration suites went green (245s, 220s,
+223s), zero skips, zero assertion failures, plus a dedicated evidence run.
+
+**The proof that matters.** A malicious leader program cannot be injected into a real
+validator set, so "the exploit is closed on chain" was established a different way:
+the deployed code was fetched back with `gen_getContractCode` and is **byte-identical**
+to the local source.
+
+```
+deployed 50901 bytes | local 50901 bytes
+sha256 both: 740f263501cf5fb78b19d547c44bf0a6e7ca0c72a1ab7431f859c9640aeb28bb
+deployed contains 'must carry only id and kind': True
+deployed contains '_clause_text(cid)':           True
+deployed contains a stored "question" key:       False
+```
+
+So the code running on Studionet provably contains the rejection guard and the
+immutable-clause binding, and provably does not contain the removed field.
+
+**The real model complied with the tightened grammar on the first attempt.** The
+admitted program, read back from chain:
+
+```json
+{"clauses":[
+ {"id":"1","kind":"mechanised","effect":"require",
+  "predicate":{"op":"cmp","field":"word_count","rel":"ge","value":200}},
+ {"id":"2","kind":"mechanised","effect":"require",
+  "predicate":{"op":"cmp","field":"language","rel":"eq","value":"English"}},
+ {"id":"3","kind":"mechanised","effect":"require",
+  "predicate":{"op":"cmp","field":"has_tests","rel":"eq","value":true}},
+ {"id":"4","kind":"residual"}]}
+```
+
+`residual_carries_only_id_and_kind: true`, and the serialised program contains no
+`question` substring. No prompt iteration and no relaxation of validation was needed.
+
+**Current evidence.** All FINALIZED via `gen_getTransactionStatus`; both ABIs resolve.
+
+| Step | Identifier |
+|---|---|
+| CompiledPolicy | `0x8a0535eD57C455ADD0acB20206AAF1582730AD13` |
+| digest / version | `eb930c478c1d1405a5454533608e39054ba6d86af7447dfba7cf4b12f21f9aae`, v1 |
+| compile | `0x027f06920fe51162c24c9d68c9bcede55337709b0791bb088931c3558e84b4c6` |
+| adjudicate | `0x4028add0ed17c5883cc2ef8657502838b62466b57ea74a75343068d12494a41b` |
+| GatedVault | `0x660DcE4B754744100cF04012a45B3DA07798b60c` |
+| fund | `0x4312334b904376f8decedd3e89fa47ba3ed364b4530f0f188771fec9e6b95930` |
+| release, refused | `0x12a49084f1e12edc64ac37ae7d0e51661200ac8f2cbc22b9c3946b233a72ada0` |
+| release | `0x8dd56e86ad5bdd9449f2a965db0c6b2a0691f5fd2846540a8bad377fc5f88edb` |
+| withdraw | `0xd128ef08fc24be704af205ee9cfc07c04d0abb2f72caf386a87731cdc2079579` |
+
+Lifecycle detail: `fund` -> `held 1000`; `release(TOO_SHORT)` refused with `held`
+still `1000` and `released: false`; `preview` returning `FAIL` then `PASS`;
+`release(GOOD)` -> `held 0`, `claimable 1000`, `released: true`; a second `release`
+refused; `withdraw` -> outbound message `value: 1000`, `claimable 0`. The ruling was
+`{"id":"4","satisfied":true}`, `stale: false`, bound to the current digest.
+
+**The previous deployment is superseded, not deleted.** `0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294` and
+`0x8759c4dA2208ED29eF62F935E9FE390031173163` implement the rejected design and always will; the contracts are not
+upgradable, so replacement was the only option. Their identifiers are retained in
+README under "Superseded deployment" so the record is complete, explicitly marked as
+history rather than current evidence.
+
+**Failures observed, classified, and not worked around.** Three runs during this
+phase aborted on `Temporary failure in name resolution` for `studio.genlayer.com` --
+transport/DNS, class 3. Each produced **zero** assertion failures; the tests that had
+already executed passed. DNS was probed until it resolved 10/10, then the suite was
+re-run unchanged. No code, prompt, assertion or validation was touched in response to
+any failure, and no failure is hidden: the aborted run is recorded here precisely
+because the temptation in that moment is to quietly retry and report only the green
+result.
+
+**How to apply.** When a fix cannot be demonstrated adversarially on a live network,
+verify the deployed artefact instead. `gen_getContractCode` plus a hash comparison
+turns "we fixed it locally" into "the fixed code is what is running", which is the
+claim that actually matters.
+
+---
+
+## 2026-08-30 -- Portal rejection: the residual path was not consensus-bound. Fixed by deleting the field.
+
+**The rejection, verbatim.** "The residual-clause path is not yet consensus-bound.
+During compilation, validators compare only whether a clause is residual, while the
+leader's generated question is stored unchecked and later becomes the wording
+adjudicated for PASS or FAIL. Please bind each residual question to the original
+immutable clause -- preferably derive it deterministically from that clause or
+require validators to compare its exact canonical meaning -- before using the ruling
+to authorize downstream actions."
+
+**Valid, and it was the strongest available objection.** Confirmed against the
+source before acting. `_kind_signature` compared `[[id, kind]]` only; `_eval_program`
+treated a residual clause as an id, so the question could not influence a verdict
+vector and gate 3 was structurally blind to it; `_validate_program` checked only that
+the question was a non-empty string under 240 chars; `_canon_program` stored it
+verbatim; and `adjudicate` built its prompt from that stored string while never
+referencing `self.clauses` at all.
+
+**The exploit.** Declare clause 4 -- "The writing must be clear and respectful in
+tone." -- residual with `question: "Is the submission non-empty?"`. Structural gate
+passes. Acceptance vectors pass. The split matches the validator's. Verdict vectors
+match, because a residual clause cannot change one. Admitted. Every later
+adjudication then rules on a question the rule never asked, returns PASS, and
+`GatedVault` converts that into an irreversible GEN transfer.
+
+The sharpest way to put it: the second consensus round was sound relative to its
+input, but its input was never made sound. Both sides independently agreed on the
+answer to the wrong question, so `validate_ruling` worked perfectly while enforcing
+something the rule did not say.
+
+**Decision: delete the field.** A residual declaration is now `{"id", "kind"}`. The
+text adjudicated is read from `self.clauses` by id. Chosen over the two alternatives:
+
+- *Include the question in `_kind_signature`.* Would require two independent LLM
+  compilations to emit byte-identical prose. Would essentially never agree.
+- *Add an LLM check that the question restates the clause.* Adds a new
+  nondeterministic surface and replaces a deterministic guarantee with an opinion --
+  the opposite of this project's rule of settling by execution where possible.
+
+Deleting it **removes** a consensus surface rather than adding one: id and kind are
+now a residual clause's entire content, so the gate-3 split comparison already covers
+it completely. It also makes the "the rule is immutable" claim true in effect rather
+than only literally, stops policy identity depending on model phrasing, and closes an
+injection path where leader-authored text flowed into a later prompt.
+
+`_validate_program` now **rejects** any extra field on a residual clause rather than
+ignoring it, so the substitution is inexpressible rather than merely unused.
+
+**Also corrected: a documentation claim, not just code.** README and CONTRACT.md
+asserted there was "no default-allow branch anywhere" and that an over-permissive
+program is "rejected by code". Both were false for residual clauses. My own
+pre-deployment audit read `_kind_signature` and described it as comparing the
+mechanised/residual split without noticing that the *content* of the residual
+declaration was what later authorised. That is the more useful lesson than the bug:
+a field that no gate reads is a field no gate protects.
+
+**Tests, mutation-checked.** Four added:
+`test_the_substituted_residual_question_exploit_is_inexpressible`,
+`test_an_admitted_program_carries_no_residual_wording`,
+`test_adjudication_judges_the_immutable_clause_text`,
+`test_a_substituted_question_never_reaches_the_adjudicator`. The last two use two
+ordered LLM mocks -- one matching the immutable clause prose, one catch-all answering
+the opposite way -- so the verdict itself reveals which text reached the model.
+To prove they have teeth rather than passing incidentally, `adjudicate` was
+temporarily mutated to send the substituted question again: both tests failed, and
+both passed once the mutation was reverted. Suite: 66 -> 71 tests, all passing.
+
+**Consequence: the deployed evidence is superseded.** The contracts are not
+upgradable and the rule is immutable per instance, so this requires a fresh
+deployment. `0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294` and
+`0x8759c4dA2208ED29eF62F935E9FE390031173163` implement the rejected design and
+always will. Every transaction hash recorded below documents that version. README now
+carries an explicit warning to that effect, and the evidence must be regenerated
+before resubmission.
+
+**How to apply.** When a field is written by a nondeterministic actor and read by an
+authorisation path, either a gate compares it or it must not exist. There is no third
+option, and "it is in the digest" is not a gate -- a digest records what was agreed,
+not that anything checked it.
+
+---
+
 ## 2026-08-29 -- final verification state before publication
 
 **Re-read from the network, not from an old log.** Every recorded transaction was
@@ -56,6 +219,8 @@ either in a submission. Hosted Studio state can be reset, so any claim about a
 deployed address should be re-checked rather than trusted from a log.
 
 ---
+
+## 2026-08-28 -- Studionet integration suite passed; the whole lifecycle is now live evidence
 
 **Result.** `gltest --network studionet tests/integration` collected 6 tests and
 passed all 6 in 5m27s against `https://studio.genlayer.com/api` (chain id `61999`,
@@ -173,6 +338,8 @@ and reserve the caution for the residual round, which is genuinely a judgement a
 should never be asserted as PASS.
 
 ---
+
+## 2026-08-28 -- `gen_call` rejects string arguments above roughly 200 bytes (client/node bug, not ours)
 
 **Found by accident, isolated on purpose.** Lengthening the integration test's
 `body` field to real prose (382 chars) turned a green suite red with

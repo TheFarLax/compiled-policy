@@ -110,6 +110,32 @@ model is asked for an `overall` verdict in the residual round and that field is
 deliberately **discarded**: the verdict is recomputed on-chain from the
 per-clause rulings. A model cannot self-certify an aggregate here.
 
+### Residual clauses are bound to the immutable rule
+
+A residual declaration is `{"id", "kind"}` and nothing else. When `adjudicate()`
+runs, the text put in front of the model is read back from `self.clauses` — the
+prose fixed by the constructor — addressed by clause id.
+
+This is the whole security argument for the residual path, and it is the one thing
+an earlier version of this contract got wrong. Previously the compiler supplied its
+own `question` for each residual clause, and that string was stored and later became
+the wording adjudicated for `PASS`. Nothing constrained it: the mechanised/residual
+split matched, the acceptance vectors were unaffected, and a residual clause cannot
+influence a verdict vector, so the differential comparison was structurally blind to
+it. A leader could declare *"The writing must be clear and respectful in tone"*
+residual with the question *"Is the submission non-empty?"*, pass every gate, and
+have every subsequent adjudication rule on a question the rule never asked.
+
+Deriving the text from immutable storage removes that surface rather than policing
+it. The residual declaration is now pure id + kind, which is exactly what
+`_kind_signature` already compares between the two independent compilations — so
+nothing about a residual clause escapes consensus. `_validate_program` **rejects** any
+extra field on a residual clause rather than ignoring it, so the substitution is
+inexpressible rather than merely unused. Two tests pin the binding in both
+directions — the immutable clause prose must reach the adjudicator, and the
+substituted wording must not — and both were mutation-tested against the old
+behaviour.
+
 ## The grammar
 
 Small on purpose. The whitelist **is** the security boundary: nothing in the
@@ -143,10 +169,13 @@ A program looks like this:
 {"clauses": [
   {"id": "1", "kind": "mechanised", "effect": "require",
    "predicate": {"op": "cmp", "field": "word_count", "rel": "ge", "value": 200}},
-  {"id": "4", "kind": "residual",
-   "question": "Is the writing clear and respectful in tone?"}
+  {"id": "4", "kind": "residual"}
 ]}
 ```
+
+A residual clause carries **only its id**. The text adjudicated later is read back
+from the immutable rule, addressed by that id — the compiler never authors it. See
+"Residual clauses are bound to the immutable rule" below for why that matters.
 
 `effect: "require"` means the predicate must be **true** to pass;
 `effect: "forbid"` means it must be **false**. Both are supported because
@@ -297,7 +326,7 @@ Direct mode is the default: in-process, no network, no model, no Docker.
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt        # genlayer-test==0.29.2, genvm-linter==0.11.0
-pytest -q                  # 66 tests, ~13 seconds
+pytest -q                  # 71 tests, ~10 seconds
 genvm-lint check contracts/compiled_policy.py
 genvm-lint check contracts/gated_vault.py
 ```
@@ -348,6 +377,18 @@ Agreement and disagreement are both covered:
 | leader result malformed / not JSON | rejects |
 | leader errored where the validator did not | rejects, forcing leader rotation |
 
+The residual binding has its own regression tests, and they were **mutation-tested**
+to prove they detect the old vulnerable behaviour rather than passing incidentally:
+`adjudicate` was temporarily reverted to send a substituted question, both tests
+failed, and both passed again once reverted.
+
+| Test | Asserts |
+|---|---|
+| `test_the_substituted_residual_question_exploit_is_inexpressible` | the exact rejected exploit is refused at compile time |
+| `test_an_admitted_program_carries_no_residual_wording` | admitted residual clauses have keys exactly `["id","kind"]` |
+| `test_adjudication_judges_the_immutable_clause_text` | the immutable prose reaches the adjudicator |
+| `test_a_substituted_question_never_reaches_the_adjudicator` | the substituted wording does not |
+
 Integration tests run against a live endpoint:
 
 ```bash
@@ -356,84 +397,134 @@ gltest --network studionet tests/integration
 
 ## Verification status
 
-Both suites have been run. Stated precisely, because the distinction matters.
+Both suites have been run against the current source. Stated precisely, because the
+distinction matters.
 
-**Direct mode — 66 tests, ~13s, no network, no model.** Covers the deterministic
-core, all five verdicts, the three structural/behavioural gates, versioning,
-access control, idempotency, digest binding, and validator agreement *and*
-disagreement via `run_validator()`.
+**Direct mode -- 71 tests, ~10s, no network, no model.** Covers the deterministic
+core, all five verdicts, the three structural/behavioural gates, versioning, access
+control, idempotency, digest binding, the residual-binding regression tests, and
+validator agreement *and* disagreement via `run_validator()`.
 
-**Studionet — 6 integration tests, all passed in 5m27s**, against
-`https://studio.genlayer.com/api` (chain id `61999`) with a real model and a real
-validator set. A separate evidence run captured the following, and it is the part
-that could not be inferred from direct mode:
+**Studionet -- 6 integration tests, three consecutive green suites** (245s, 220s,
+223s) against `https://studio.genlayer.com/api` (chain id `61999`) with a real model
+and a real validator set, plus a separate evidence run that captured the lifecycle
+below. Zero skips, zero assertion failures.
+
+### Live evidence (current)
+
+Deployed from the source in this repository. The deployed code was fetched back with
+`gen_getContractCode` and is **byte-identical** to `contracts/compiled_policy.py`
+(sha256 `740f263501cf5fb78b19d547c44bf0a6e7ca0c72a1ab7431f859c9640aeb28bb`, 50,901
+bytes), which is what proves the fixed logic is the logic running on chain.
 
 | What | Evidence |
 |---|---|
-| Policy contract | `0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294` |
-| `compile_policy()` | tx `0x5be55335175dc8efc31d1d879492229f49b18f174d5f867c0a2f2027e11546da`, FINALIZED |
-| Admitted digest / version | `2a6161242df7a814a89cf7e95869202adaca2b7e63ead2a6699e369ed7ee5684`, v1 |
-| `adjudicate()` | tx `0xd6210f85109868f741fca55ac4e7a814f7e183b1d2a9554726351ca051024c7d`, FINALIZED |
-| Vault contract | `0x8759c4dA2208ED29eF62F935E9FE390031173163` |
-| `fund()` | tx `0xdd8e49c37d9f79c9b1629ed87495838b23f82ba1a3adb00227379ccdb45caf8a`, FINALIZED |
-| `release()` on a failing payload | tx `0x703d12ac4fe1988adcfb0124b1d21c9241fb76c5ee0ab771864487ce2dcd77c3`, correctly **rejected**; escrow untouched |
-| `release()` on a passing payload | tx `0xd3cf6792dae585098dba3db552a810fe8bbceca9974ca0921f0d1c3395c830f7`, FINALIZED |
-| `withdraw()` | tx `0x21f3c2c77c1ccb92d647c7d46fe7e126cd52576b0d8e096104d56a42637a7f83`, FINALIZED, outbound message `value: 1000` |
+| CompiledPolicy contract | `0x8a0535eD57C455ADD0acB20206AAF1582730AD13` |
+| `compile_policy()` | tx `0x027f06920fe51162c24c9d68c9bcede55337709b0791bb088931c3558e84b4c6`, FINALIZED |
+| Admitted digest / version | `eb930c478c1d1405a5454533608e39054ba6d86af7447dfba7cf4b12f21f9aae`, v1 |
+| `adjudicate()` | tx `0x4028add0ed17c5883cc2ef8657502838b62466b57ea74a75343068d12494a41b`, FINALIZED |
+| GatedVault contract | `0x660DcE4B754744100cF04012a45B3DA07798b60c` |
+| `fund()` | tx `0x4312334b904376f8decedd3e89fa47ba3ed364b4530f0f188771fec9e6b95930`, FINALIZED |
+| `release()` on a failing payload | tx `0x12a49084f1e12edc64ac37ae7d0e51661200ac8f2cbc22b9c3946b233a72ada0`, correctly **rejected**; escrow untouched at 1000 |
+| `release()` on a passing payload | tx `0x8dd56e86ad5bdd9449f2a965db0c6b2a0691f5fd2846540a8bad377fc5f88edb`, FINALIZED |
+| `withdraw()` | tx `0xd128ef08fc24be704af205ee9cfc07c04d0abb2f72caf386a87731cdc2079579`, FINALIZED, outbound message `value: 1000` |
 
-All six transactions were `ACCEPTED` when submitted and have since reached
-`FINALIZED`; the statuses above were re-read from `gen_getTransactionStatus` on
-2026-08-29, and both contract ABIs still resolve via `gen_getContractSchema`.
+All six transactions report `FINALIZED` via `gen_getTransactionStatus`, and both
+contract ABIs resolve via `gen_getContractSchema` (8 and 6 methods).
 
-**A real model produced exactly the faithful mechanisation** — `word_count >= 200`,
-`language == "English"`, `has_tests == true`, and clause 4 correctly declared
-residual with the question *"Is the writing clear and respectful in tone?"* All
-three acceptance vectors then returned the right verdict with the right violated
-clause id, the residual ruling came back `PASS` with `stale: false`, and the vault
-went `held 1000 -> 0`, `claimable 1000 -> 0`.
+**A real model produced exactly the faithful mechanisation, in the new
+representation** -- `word_count >= 200`, `language == "English"`,
+`has_tests == true`, and clause 4 declared residual as `{"id": "4", "kind":
+"residual"}` with **no** question, restatement or reason field. Verified on chain:
+`residual_carries_only_id_and_kind: true`, and the serialised program contains no
+`question` substring at all. No prompt iteration and no weakening of validation was
+needed to get this; the model complied on the first attempt.
+
+All three acceptance vectors then returned the right verdict with the right violated
+clause id, the residual ruling came back `PASS` with `stale: false` bound to the
+current digest, a failing payload was refused with the escrow intact, a second
+`release` was refused, and the vault went `held 1000 -> 0`, `claimable 1000 -> 0`.
 
 This also confirms three surfaces direct mode cannot reach: the synchronous
-cross-contract read, `preview()` as a **view calling another contract's view**, and
-a real native GEN transfer via `emit_transfer`.
+cross-contract read, `preview()` as a **view calling another contract's view**, and a
+real native GEN transfer via `emit_transfer`.
 
 ### Reproducing the live reads
 
-The stored ruling is keyed by `(policy_version, payload)`, so it only resolves for
-the exact payload the evidence run used. That payload's `body` is
-`"a careful writeup"` — **not** the body the integration test now uses, which was
-shortened for an unrelated reason (see Limitations). Replaying with any other body
-correctly returns `NO_RULING`.
+The stored ruling is keyed by `(policy_version, payload)`, so it resolves only for
+the exact payload the evidence run used:
 
 ```python
-GOOD = {"word_count": 500, "language": "English",
-        "has_tests": True, "body": "a careful writeup"}   # digest 783f450a...f3d2
+GOOD = {"word_count": 500, "language": "English", "has_tests": True,
+        "body": "Thanks for reviewing. Fixes an off-by-one in pagination; tests added."}
+# payload digest 9ebe4eccc2ae9a70cf4f6456a8e8302b5c08311451dd6fe3cef5742bd4a2f08a
 ```
 
-Against the deployed contracts this returns, today:
+Against the deployed contracts this returns:
 
 ```
-policy.status()            -> compiled: true, policy_version: 1, ruling_count: 1
-policy.program()           -> the four clauses above, clause 4 residual
-policy.evaluate(GOOD)      -> {"verdict":"RESIDUAL_REQUIRED","residual":["4"]}
-policy.ruling_for(GOOD)    -> {"rulings":[{"id":"4","satisfied":true}],
-                               "stale":false,"verdict":"PASS"}
-vault.preview(GOOD)        -> "PASS"
-vault.status()             -> released: true, held: 0, last_verdict: "PASS"
+policy.status()          -> compiled: true, policy_version: 1, ruling_count: 1,
+                            policy_digest: eb930c47...9aae
+policy.program()         -> the three predicates above, plus {"id":"4","kind":"residual"}
+policy.evaluate(GOOD)    -> {"verdict":"RESIDUAL_REQUIRED","residual":["4"]}
+policy.ruling_for(GOOD)  -> {"rulings":[{"id":"4","satisfied":true}],
+                             "stale":false,"verdict":"PASS"}
+vault.preview(GOOD)      -> "PASS"
+vault.status()           -> released: true, held: 0, last_verdict: "PASS"
 ```
 
-Substituting the `word_count: 10` payload returns `{"verdict":"FAIL","violated":["1"]}`,
-which is deterministic enforcement readable on-chain with no model in the loop.
+Substituting `word_count: 10` returns `{"verdict":"FAIL","violated":["1"]}` --
+deterministic enforcement readable on-chain with no model in the loop.
 
-**Still unverified:** behaviour on Asimov/Bradbury testnets; whether a *different*
-model or validator mix compiles this rule equally well (one green suite is not a
-distribution — the residual ruling genuinely differed between runs); the appeal
-path; and a *large* payload through a contract-to-contract call.
-`DECISIONS.md` keeps the full list.
+### Superseded deployment (history, not current evidence)
 
-Two limitations surfaced while running this and are recorded rather than papered
-over: `gen_call` rejects string arguments above roughly 200 bytes (a client/node RLP
-bug, isolated with a size sweep — see Limitations), and the integration vault test
-had a hidden dependency on test ordering, now removed. Neither required a contract
-change; no contract logic was altered after the first green integration run.
+The first deployment implemented the earlier design in which a residual clause
+carried compiler-authored wording. That design was rejected for the reason set out
+in "Residual clauses are bound to the immutable rule", and the contracts are not
+upgradable, so it was replaced rather than patched. These identifiers are retained
+only so the record is complete. **They must not be cited as evidence for the current
+contract.**
+
+| Superseded | Identifier |
+|---|---|
+| CompiledPolicy (old) | `0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294` |
+| GatedVault (old) | `0x8759c4dA2208ED29eF62F935E9FE390031173163` |
+| compile (old) | `0x5be55335175dc8efc31d1d879492229f49b18f174d5f867c0a2f2027e11546da` |
+| adjudicate (old) | `0xd6210f85109868f741fca55ac4e7a814f7e183b1d2a9554726351ca051024c7d` |
+| fund (old) | `0xdd8e49c37d9f79c9b1629ed87495838b23f82ba1a3adb00227379ccdb45caf8a` |
+| release, refused (old) | `0x703d12ac4fe1988adcfb0124b1d21c9241fb76c5ee0ab771864487ce2dcd77c3` |
+| release (old) | `0xd3cf6792dae585098dba3db552a810fe8bbceca9974ca0921f0d1c3395c830f7` |
+| withdraw (old) | `0x21f3c2c77c1ccb92d647c7d46fe7e126cd52576b0d8e096104d56a42637a7f83` |
+
+**Still unverified, stated plainly:**
+
+- **Only Studionet has been exercised.** Asimov and Bradbury are untested, and Studio
+  is documented as diverging from a live network on gas, ghost contracts and EVM
+  interaction.
+- **The appeal path has not been exercised.** `adjudicate()` is idempotent per
+  `(policy_version, payload)` specifically so an appeal re-execution cannot
+  double-append or double-credit, but no transaction here was appealed.
+- **The compilation success rate is empirical, not a reliability proof.** Three green
+  suites plus one evidence run is four data points on one rule with one validator mix.
+  A different model, mix or rule could fail to compile -- and the honest failure mode
+  is a *rejected* compilation, never a bad admission.
+- **Behavioural equivalence is probe-bounded** (at most 96 deterministic probes), so
+  it is checked, not proven. Two programs differing only on a combination no probe
+  reaches would be treated as equivalent.
+- **`gen_call` rejects string arguments above roughly 200 bytes** with an RLP
+  length-prefix error. This is a client/node bug, not a contract one -- the same
+  argument passes through the write path and through a contract-to-contract call --
+  but it does limit RPC-facing payloads today. A *large* payload through a
+  contract-to-contract call remains unconfirmed end to end.
+
+`DECISIONS.md` keeps the full record, including the failures that were observed and
+their classification.
+
+One environmental note, since it affected several runs: this development environment
+suffers intermittent DNS resolution failures for `studio.genlayer.com`
+(`Temporary failure in name resolution`). Those runs produced **zero** assertion
+failures -- the transactions that had already landed were correct -- and were re-run
+unchanged. No code, prompt or assertion was altered in response to any failure.
 
 ## Deploying
 
@@ -453,8 +544,8 @@ suite fail to load, so it was not adopted. See `DECISIONS.md`.
 ```
 contracts/compiled_policy.py   the primitive
 contracts/gated_vault.py       minimal reference consumer (not a second primitive)
-tests/direct/                  66 tests: no network, no model, ~13s
-tests/integration/             6 Studionet tests (passed; see Verification status)
+tests/direct/                  71 tests: no network, no model, ~10s
+tests/integration/             6 Studionet tests (3 green suites; see Verification status)
 CONTRACT.md                    one-page specification
 DECISIONS.md                   design record and live runner findings
 ```

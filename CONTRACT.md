@@ -35,6 +35,16 @@ All three run inside the validator *and* again in the deterministic region after
 consensus returns, so an admitted program passed every gate on every node that
 looked at it.
 
+**Residual clauses are bound to the immutable rule.** A residual declaration is
+`{"id", "kind"}` and nothing else; `adjudicate()` reads the text it judges back from
+`self.clauses`, addressed by clause id. Because id and kind are the clause's entire
+content, gate 3's split comparison covers it completely — nothing about a residual
+clause escapes consensus. An earlier version let the compiler author a `question`
+that was stored unchecked and later became the wording adjudicated for `PASS`; that
+string was constrained by nothing, since residual clauses cannot influence a verdict
+vector. Deriving the text from immutable storage removes the surface instead of
+policing it.
+
 **State.**
 
 | Field | Mutability | Notes |
@@ -59,6 +69,15 @@ looked at it.
 
 **Reuse.** `policy.view().evaluate(payload)` from any contract's deterministic
 region; gate on `PASS`.
+
+**Verified live.** CompiledPolicy `0x8a0535eD57C455ADD0acB20206AAF1582730AD13`,
+digest `eb930c478c1d1405a5454533608e39054ba6d86af7447dfba7cf4b12f21f9aae`, v1.
+Compile tx `0x027f06920fe51162c24c9d68c9bcede55337709b0791bb088931c3558e84b4c6` and
+adjudication tx `0x4028add0ed17c5883cc2ef8657502838b62466b57ea74a75343068d12494a41b`,
+both FINALIZED. The deployed code was fetched with `gen_getContractCode` and is
+byte-identical to `contracts/compiled_policy.py`. A real model emitted the residual
+clause as `{"id":"4","kind":"residual"}` with no extra field. The earlier policy at
+`0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294` is **superseded**.
 
 **Limits.** Behavioural equivalence is probe-bounded, not proven. Subjective
 rules degrade to per-payload adjudication. The prose rule cannot be amended after
@@ -111,9 +130,13 @@ no expiry and no cancel. This is a deliberate omission that keeps the reference
 contract readable in one sitting; anything holding real value needs an
 owner-refund or expiry path added first.
 
-**Verified live.** Studionet, 2026-08-28: `fund` -> failing `release` correctly
-rejected -> `preview` returning `PASS`/`FAIL` -> `release` -> `withdraw` emitting an
-outbound message of `value: 1000`. Contract `0x8759c4dA2208ED29eF62F935E9FE390031173163`.
-Every transaction in that sequence has since reached `FINALIZED`, re-read on
-2026-08-29. This also confirms `preview()` works as a view calling another
-contract's view, which direct mode cannot exercise.
+**Verified live.** Studionet: `fund` -> failing `release` correctly rejected ->
+`preview` returning `PASS`/`FAIL` -> `release` -> `withdraw` emitting an outbound
+message of `value: 1000` -> `claimable 0`. Contract
+`0x660DcE4B754744100cF04012a45B3DA07798b60c`, wired to CompiledPolicy
+`0x8a0535eD57C455ADD0acB20206AAF1582730AD13`. A second `release` was refused. Every
+transaction in the sequence reports `FINALIZED`. This also confirms `preview()` works
+as a view calling another contract's view, which direct mode cannot exercise.
+
+The earlier vault at `0x8759c4dA2208ED29eF62F935E9FE390031173163` is **superseded**;
+it was wired to the pre-fix policy. See README, "Superseded deployment".

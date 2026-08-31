@@ -57,7 +57,7 @@ FAITHFUL = {
             "effect": "require",
             "predicate": {"op": "cmp", "field": "has_tests", "rel": "eq", "value": True},
         },
-        {"id": "4", "kind": "residual", "question": "Is the writing clear and respectful in tone?"},
+        {"id": "4", "kind": "residual"},
     ]
 }
 

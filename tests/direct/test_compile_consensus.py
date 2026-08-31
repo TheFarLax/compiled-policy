@@ -60,7 +60,7 @@ def test_canonicalisation_makes_the_digest_shape_independent(direct_vm, policy):
         out = json.loads(json.dumps(FAITHFUL))
         out["clauses"] = [
             clause("1", effect="require", predicate={"op": "and", "args": args}),
-            clause("2", kind="residual", question="Is the language acceptable to a reader?"),
+            clause("2", kind="residual"),
             out["clauses"][2],
             out["clauses"][3],
         ]
@@ -155,7 +155,7 @@ def test_validator_rejects_a_program_that_moves_a_clause_to_residual(direct_vm, 
     direct_vm.mock_llm(COMPILE_PROMPT, json.dumps(FAITHFUL))
     policy.compile_policy()
 
-    dodged = program_with("3", clause("3", kind="residual", question="Did they include tests?"))
+    dodged = program_with("3", clause("3", kind="residual"))
     direct_vm.clear_mocks()
     direct_vm.mock_llm(COMPILE_PROMPT, json.dumps(dodged))
     assert direct_vm.run_validator() is False
@@ -189,7 +189,10 @@ def test_validator_disagrees_when_the_leader_errored_but_it_did_not(direct_vm, p
         ("ordering on a str field", program_with("2", clause("2", effect="require", predicate={"op": "cmp", "field": "language", "rel": "gt", "value": "English"}))),
         ("bool literal in an int field", program_with("1", clause("1", effect="require", predicate={"op": "cmp", "field": "word_count", "rel": "ge", "value": True}))),
         ("bad effect", program_with("1", clause("1", effect="maybe", predicate={"op": "cmp", "field": "word_count", "rel": "ge", "value": 200}))),
-        ("residual without a question", program_with("4", clause("4", kind="residual", question="   "))),
+        ("residual carrying a leader-authored question",
+         program_with("4", clause("4", kind="residual", question="Is the submission non-empty?"))),
+        ("residual carrying any extra field",
+         program_with("4", clause("4", kind="residual", note="tone is subjective"))),
     ],
 )
 def test_structural_violations_are_rejected(direct_vm, policy, name, program):
@@ -207,14 +210,14 @@ def test_missing_or_invented_clauses_are_rejected(direct_vm, policy):
 
     direct_vm.clear_mocks()
     invented = json.loads(json.dumps(FAITHFUL))
-    invented["clauses"].append(clause("9", kind="residual", question="Invented clause?"))
+    invented["clauses"].append(clause("9", kind="residual"))
     direct_vm.mock_llm(COMPILE_PROMPT, json.dumps(invented))
     with direct_vm.expect_revert():
         policy.compile_policy()
 
 
 def test_an_all_residual_program_is_not_a_compilation(direct_vm, policy):
-    dodge = {"clauses": [clause(str(i), kind="residual", question="Judge clause %d?" % i) for i in range(1, 5)]}
+    dodge = {"clauses": [clause(str(i), kind="residual") for i in range(1, 5)]}
     direct_vm.mock_llm(COMPILE_PROMPT, json.dumps(dodge))
     with direct_vm.expect_revert():
         policy.compile_policy()
@@ -254,3 +257,51 @@ def test_a_genuinely_different_mechanisation_bumps_the_version(direct_vm, policy
     assert second["policy_digest"] != first["policy_digest"]
     # And the new mechanisation is what enforcement now uses.
     assert json.loads(policy.evaluate(json.dumps(dict(GOOD, word_count=210))))["verdict"] == "FAIL"
+
+
+# ------------------------------------------ the rejected exploit, as a test
+def test_the_substituted_residual_question_exploit_is_inexpressible(direct_vm, policy):
+    """Regression for the flaw this contract was rejected for.
+
+    Clause 4 is "The writing must be clear and respectful in tone." Under the
+    old design a leader could declare it residual and attach its own question --
+    "Is the submission non-empty?" -- which was stored unchecked and later became
+    the wording adjudicated for PASS. It passed every gate: the mechanised/
+    residual split matched, the acceptance vectors were unaffected, and a
+    residual clause cannot influence a verdict vector, so the differential
+    comparison was blind to it.
+
+    A residual clause now carries only an id and a kind, so the substitution
+    cannot be expressed at all. The program is refused and nothing is admitted."""
+    exploit = program_with(
+        "4", clause("4", kind="residual", question="Is the submission non-empty?")
+    )
+    direct_vm.mock_llm(COMPILE_PROMPT, json.dumps(exploit))
+    with direct_vm.expect_revert():
+        policy.compile_policy()
+
+    status = json.loads(policy.status())
+    assert status["compiled"] is False
+    assert status["policy_version"] == 0
+
+
+def test_an_admitted_program_carries_no_residual_wording(direct_vm, policy):
+    """Nothing the compiler could write about a residual clause survives into
+    state, so policy identity cannot depend on model phrasing."""
+    direct_vm.mock_llm(COMPILE_PROMPT, json.dumps(FAITHFUL))
+    policy.compile_policy()
+    first = json.loads(policy.status())
+
+    admitted = json.loads(policy.program())
+    residual = [c for c in admitted["clauses"] if c["kind"] == "residual"]
+    assert residual, "the faithful compilation should leave one clause residual"
+    for clause_record in residual:
+        assert sorted(clause_record.keys()) == ["id", "kind"], clause_record
+
+    # And because the wording is gone, an otherwise-identical recompilation is
+    # refused as identical rather than admitted as a new version.
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(COMPILE_PROMPT, json.dumps(FAITHFUL))
+    with direct_vm.expect_revert("identical program"):
+        policy.compile_policy()
+    assert json.loads(policy.status())["policy_digest"] == first["policy_digest"]

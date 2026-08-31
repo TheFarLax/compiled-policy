@@ -135,7 +135,9 @@ def test_the_admitted_program_stays_inside_the_grammar(compiled_policy):
             assert clause["effect"] in ("require", "forbid")
             walk(clause["predicate"])
         else:
-            assert clause["question"].strip()
+            # A residual declaration carries only id and kind. The text that
+            # gets adjudicated is read from the immutable rule, not from here.
+            assert sorted(clause.keys()) == ["id", "kind"], clause
     assert mechanised >= 1
 
 def test_readmitting_an_identical_program_is_refused(compiled_policy):

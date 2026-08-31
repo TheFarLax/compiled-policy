@@ -60,6 +60,22 @@ RESIDUAL CLAUSES
   never a pass -- and `adjudicate()` runs a second, separate consensus round
   over just those clauses, bound to the policy digest it was decided under.
 
+  A residual declaration carries NOTHING BUT THE CLAUSE ID. The text that is
+  actually adjudicated is read back from `self.clauses`, the immutable prose
+  fixed by the constructor. The compiler cannot author, paraphrase or narrow the
+  question that later authorises a PASS.
+
+  This is deliberate, and it is the whole security argument for the residual
+  path. If the compiler supplied its own wording, that wording would become the
+  test a later consensus round rules on -- and nothing in the compilation gates
+  constrains free text. A leader could declare clause 4 residual with the
+  question "is the submission non-empty?", pass every gate (the split matches,
+  and residual clauses cannot affect a verdict vector), and thereafter every
+  adjudication would rule on a question the rule never asked. Deriving the text
+  from immutable storage removes that surface instead of trying to police it: the
+  residual declaration is now pure id + kind, which is exactly what
+  `_kind_signature` already compares between the two independent compilations.
+
 FAILURE IS NEVER A PASS
   Five verdicts, and only one of them authorises anything:
     UNCOMPILED       no program admitted yet
@@ -286,10 +302,18 @@ def _validate_program(program, fields: dict, clause_ids) -> None:
         kind = clause.get("kind")
         require(kind in (_KIND_MECH, _KIND_RESIDUAL), ERROR_LLM + " bad clause kind: " + str(kind)[:20])
         if kind == _KIND_RESIDUAL:
-            question = clause.get("question")
+            # A residual declaration is an id and nothing else. Any extra field
+            # is refused rather than ignored: leader-authored text must not be
+            # able to reach the adjudication prompt even by accident, and a
+            # program that tries is a program that misunderstood the grammar.
+            extra = sorted(k for k in clause.keys() if k not in ("id", "kind"))
             require(
-                isinstance(question, str) and 0 < len(question.strip()) <= _MAX_STR,
-                ERROR_LLM + " residual clause " + cid + " needs a question",
+                not extra,
+                ERROR_LLM
+                + " residual clause "
+                + cid
+                + " must carry only id and kind; got extra field(s): "
+                + ",".join(extra)[:60],
             )
             continue
 
@@ -329,9 +353,7 @@ def _canon_program(program) -> dict:
     for clause in program["clauses"]:
         cid = str(clause["id"]).strip()
         if clause.get("kind") == _KIND_RESIDUAL:
-            clauses.append(
-                {"id": cid, "kind": _KIND_RESIDUAL, "question": str(clause["question"]).strip()[:_MAX_STR]}
-            )
+            clauses.append({"id": cid, "kind": _KIND_RESIDUAL})
         else:
             clauses.append(
                 {
@@ -571,7 +593,11 @@ def _verdict_vector(program, probes) -> list:
 def _kind_signature(program) -> str:
     """Which clauses were mechanised and which were declared residual. The two
     independent compilations must agree on this split, otherwise they disagree
-    about what the rule even makes checkable."""
+    about what the rule even makes checkable.
+
+    Because a residual declaration carries only an id and a kind, this covers a
+    residual clause's ENTIRE content. Nothing about a residual clause escapes
+    comparison, which is what makes the residual path consensus-bound."""
     return _canon([[c["id"], c["kind"]] for c in program["clauses"]])
 
 
@@ -615,12 +641,15 @@ predicate program a blockchain can execute deterministically.
 Output ONLY a JSON object:
 {"clauses":[
   {"id":"<clause id>","kind":"mechanised","effect":"require"|"forbid","predicate":<node>},
-  {"id":"<clause id>","kind":"residual","question":"<one sentence a human or a
-     model must answer for a specific payload>"}
+  {"id":"<clause id>","kind":"residual"}
 ]}
 
 Rules you must follow:
 - Emit EXACTLY one entry per clause id given in the input, no more and no fewer.
+- A residual entry carries ONLY "id" and "kind". Do NOT add a question, a
+  restatement, a reason or any other field: the clause's own wording is what
+  gets judged later, read straight from the rule, and any extra field you add
+  will be rejected.
 - effect "require" means the predicate must be TRUE for the payload to pass.
   effect "forbid" means the predicate must be FALSE for the payload to pass.
 - Use "mechanised" whenever the clause can be expressed in the grammar above
@@ -635,10 +664,13 @@ Rules you must follow:
 _ADJUDICATE_TASK = """You are ruling on the clauses of a rule that could not be
 reduced to executable predicates, for one specific payload.
 
-The input gives you the payload, the residual clauses as questions, and the
-results the chain has ALREADY computed deterministically for the mechanised
-clauses. Those computed results are GROUND TRUTH: do not contradict them and do
-not re-derive them.
+The input gives you the payload, the residual clauses with their VERBATIM text
+as written in the rule, and the results the chain has ALREADY computed
+deterministically for the mechanised clauses. Those computed results are GROUND
+TRUTH: do not contradict them and do not re-derive them.
+
+Judge each residual clause exactly as written. Do not reinterpret, broaden or
+substitute an easier test for it.
 
 Output ONLY a JSON object:
 {"rulings":[{"id":"<clause id>","satisfied":true|false,"reason":"<short>"}],
@@ -786,6 +818,19 @@ class CompiledPolicy(gl.Contract):
             record = self.vectors[index]
             pairs.append((json.loads(record.payload), record.expect))
         return pairs
+
+    def _clause_text(self, cid: str) -> str:
+        """The immutable prose for a clause id. Clause ids are the 1-based
+        indices assigned by `_clause_ids`, and `_validate_program` admits a
+        program only if every id it mentions is one of them, so this lookup
+        cannot miss for an admitted program. The bound is asserted anyway
+        because this text is what authorises a residual PASS."""
+        index = int(cid) - 1
+        require(
+            0 <= index < len(self.clauses),
+            ERROR_EXPECTED + " residual clause id out of range: " + str(cid)[:20],
+        )
+        return self.clauses[index]
 
     # ============================================================== STAGE ONE
     @gl.public.write
@@ -946,10 +991,15 @@ class CompiledPolicy(gl.Contract):
             return self._ruling_json(slot - 1)
 
         residual_ids = mechanical["residual"]
-        questions = []
-        for clause in program["clauses"]:
-            if clause["kind"] == _KIND_RESIDUAL:
-                questions.append({"id": clause["id"], "question": clause["question"]})
+        # THE BINDING. The text judged for PASS/FAIL is read back from the
+        # immutable prose fixed by the constructor, addressed by clause id --
+        # never from anything the compiler wrote. Every validator builds the
+        # identical prompt input from the identical storage, so the residual
+        # round is bound to the published rule by construction rather than by
+        # a comparison that could be skipped.
+        residual_clauses = []
+        for cid in residual_ids:
+            residual_clauses.append({"id": cid, "clause": self._clause_text(cid)})
         ground_truth = []
         for clause in program["clauses"]:
             if clause["kind"] == _KIND_MECH:
@@ -959,7 +1009,7 @@ class CompiledPolicy(gl.Contract):
             {
                 "policy_digest": policy_digest,
                 "payload": payload,
-                "residual_clauses": questions,
+                "residual_clauses": residual_clauses,
                 "computed_mechanised_results": ground_truth,
             }
         )
