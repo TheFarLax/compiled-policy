@@ -511,48 +511,87 @@ and a real validator set, plus a separate evidence run that captured the lifecyc
 below. Zero skips, zero assertion failures. Those three runs exercised the
 earlier, probe-based gate 3.
 
-**Studionet against the exhaustive proof — 6/6 green, 308s.** The current source,
-`len` removed and gate 3 replaced, re-run end to end on `studionet` with a real
-model and a real validator set (not leader-only). A real compilation was admitted
-through the exhaustive equivalence gate, stayed inside the reduced grammar, was
-refused on re-admission of an identical program, and drove the vault release
-lifecycle. One rule, one run: it shows the prover accepts real model output, not
-how often it does.
+**Studionet against the exhaustive proof — 6/6 green, 308s and again 233s.** The
+current source, `len` removed and gate 3 replaced, re-run end to end on
+`studionet` with a real model and a real validator set (not leader-only). A real
+compilation was admitted through the exhaustive equivalence gate, stayed inside
+the reduced grammar, was refused on re-admission of an identical program, and
+drove the vault release lifecycle.
 
-### Live evidence (current)
+**Three distinct rules have now been compiled and admitted on Studionet** through
+the exact-equivalence gate, the last of them the canonical rule below, which
+reaches `contains` and `contains` under `or`. That shows the prover accepts real
+model output across more than one rule shape; it still does not establish a rate,
+and the state budget remains the thing a larger rule would test.
 
-Deployed from the source in this repository. The deployed code was fetched back with
-`gen_getContractCode` and is **byte-identical** to `contracts/compiled_policy.py`
-(sha256 `740f263501cf5fb78b19d547c44bf0a6e7ca0c72a1ab7431f859c9640aeb28bb`, 50,901
-bytes), which is what proves the fixed logic is the logic running on chain.
+### Live evidence (canonical deployment)
+
+Deployed from the source in this repository at commit `4a090fc`. Both deployed
+contracts were fetched back with `gen_getContractCode` and are **byte-identical**
+to the files in the commit object — `compiled_policy.py` sha256
+`2a8c6cfba3eeb57212217bb2772e73d2c9a8189e59512102f071feaded11e407` (64,272
+bytes), `gated_vault.py` sha256
+`328e2d8b9389bae418b578194e3a3d99bb539c9597e1a705c1560df3454256c2` (7,384 bytes).
+That is what proves the logic described here is the logic running on chain.
 
 | What | Evidence |
 |---|---|
-| CompiledPolicy contract | `0x8a0535eD57C455ADD0acB20206AAF1582730AD13` |
-| `compile_policy()` | tx `0x027f06920fe51162c24c9d68c9bcede55337709b0791bb088931c3558e84b4c6`, FINALIZED |
-| Admitted digest / version | `eb930c478c1d1405a5454533608e39054ba6d86af7447dfba7cf4b12f21f9aae`, v1 |
-| `adjudicate()` | tx `0x4028add0ed17c5883cc2ef8657502838b62466b57ea74a75343068d12494a41b`, FINALIZED |
-| GatedVault contract | `0x660DcE4B754744100cF04012a45B3DA07798b60c` |
-| `fund()` | tx `0x4312334b904376f8decedd3e89fa47ba3ed364b4530f0f188771fec9e6b95930`, FINALIZED |
-| `release()` on a failing payload | tx `0x12a49084f1e12edc64ac37ae7d0e51661200ac8f2cbc22b9c3946b233a72ada0`, correctly **rejected**; escrow untouched at 1000 |
-| `release()` on a passing payload | tx `0x8dd56e86ad5bdd9449f2a965db0c6b2a0691f5fd2846540a8bad377fc5f88edb`, FINALIZED |
-| `withdraw()` | tx `0xd128ef08fc24be704af205ee9cfc07c04d0abb2f72caf386a87731cdc2079579`, FINALIZED, outbound message `value: 1000` |
+| CompiledPolicy | `0xbfb3B521FA3d8104BBb7A1aA388Bb5A1Ce435f1C` |
+| deploy | tx `0x4ccf2d124eac55a6639b7e5125d6bc5410804e18c8d76e3f8821f68572b1842f` |
+| `compile_policy()` | tx `0xe2a74aee28b83a7c8dac8bccd1193bae1b138e45a1565676da0778d8dec4659c` |
+| Admitted digest / version | `dc39e5060d7f3f8f518f4516aca773225e5893650004594b78367730b27486db`, v1 |
+| `adjudicate()` polite payload | tx `0x577aac7ebf9d56bda6e3555fdeac408b8220f7dc9138717320f6a0f6fe9cbf20` → `PASS` |
+| `adjudicate()` repeated | tx `0xdb878c1231f37ea52f3db05e4ac85a6e44fd0e29952eafa75295f959302c6008`, `ruling_count` unchanged |
+| `adjudicate()` abusive payload | tx `0x80f50ce80ccd8795d631d9741eead488d01434072c354b0f432cbd51e8adc0f2` → `FAIL` |
+| GatedVault | `0x2c5895Bc7e6146c6633c4727247b8a0b0F6b850b` |
+| deploy | tx `0x1c8f6ada0af6a7834a9434e84b674d774a0f95e044f0f1e47329c8bcd4bc4ecd` |
+| `fund()` | tx `0x3e64b98c82856b8fc313566ab3ce7dede54a47c5ed858fef584182ad39402345`, value 1000 |
+| `release()` on a failing payload | tx `0x79e229315feccbbf281437111fb3f9dd34e48e53fb5e7dacdb0e2d3834aa5b85`, correctly **rejected**; escrow untouched at 1000 |
+| `release()` on a passing payload | tx `0x344581df9ecee168c25544eb1202897089ce1432191be15a8ffa794262d0eb50` |
+| second `release()` | tx `0xfbc3e0f1c2384d877b620245fe8b77872babbe80a22179bb873825de8c72dca9`, correctly **rejected** |
+| `withdraw()` | tx `0x6d75f78d088a32819830a052281e8b11b90a4b8e029ef7c7818b43408531a4ad` |
 
-All six transactions report `FINALIZED` via `gen_getTransactionStatus`, and both
-contract ABIs resolve via `gen_getContractSchema` (8 and 6 methods).
+Every transaction ran with `leader_only=false` against a five-validator set and
+settled in one round with **zero disagreements**.
 
-**A real model produced exactly the faithful mechanisation, in the new
-representation** -- `word_count >= 200`, `language == "English"`,
-`has_tests == true`, and clause 4 declared residual as `{"id": "4", "kind":
-"residual"}` with **no** question, restatement or reason field. Verified on chain:
-`residual_carries_only_id_and_kind: true`, and the serialised program contains no
-`question` substring at all. No prompt iteration and no weakening of validation was
-needed to get this; the model complied on the first attempt.
+**The rule.** Six clauses of refund-request triage over `body: str`,
+`channel: str`, `account_age_days: int`, `verified: bool`. A real model mechanised
+five and left one residual:
 
-All three acceptance vectors then returned the right verdict with the right violated
-clause id, the residual ruling came back `PASS` with `stale: false` bound to the
-current digest, a failing payload was refused with the escrow intact, a second
-`release` was refused, and the vault went `held 1000 -> 0`, `claimable 1000 -> 0`.
+```
+1  require  contains(body, "refund")
+2  require  in(channel, ["email", "web"])
+3  require  or( contains(body,"invoice"), contains(body,"order") )
+4  require  account_age_days ge 30
+5  require  verified eq true
+6  residual {"id":"6","kind":"residual"}
+```
+
+Clause 2's prose says *"either the email channel or the web channel"* and the
+model expressed that disjunction as `in` rather than `or(eq, eq)`. Both are in
+the closed grammar and exactly abstracted, and the equivalence proof compares
+behaviour, not shape. Clause 6 came back with **no** question, restatement or
+reason field. The proof needed 14 abstract states — 2, 3, 4, 3, 2 per mechanised
+clause — against caps of 2048 per clause and 16384 total.
+
+**Enforcement, live.** Each mechanised clause was violated by one targeted
+payload and named alone:
+
+```
+body without "refund"          -> {"verdict":"FAIL","violated":["1"]}
+channel: "phone"               -> {"verdict":"FAIL","violated":["2"]}
+no order and no invoice        -> {"verdict":"FAIL","violated":["3"]}
+account_age_days: 3            -> {"verdict":"FAIL","violated":["4"]}
+verified: false                -> {"verdict":"FAIL","violated":["5"]}
+```
+
+**The residual binding, shown rather than asserted.** Two payloads that differ
+only in tone pass all five mechanised clauses identically. The polite one was
+ruled `PASS` on clause 6; the abusive one `FAIL`. Nothing mechanical separates
+them, so the difference can only have come from the clause text read back from
+`self.clauses`. `vault.preview()` then returned `RESIDUAL_FAIL` for the abusive
+payload and `PASS` for the polite one, and the vault went `held 1000 -> 0`,
+`claimable 1000 -> 0`.
 
 This also confirms three surfaces direct mode cannot reach: the synchronous
 cross-contract read, `preview()` as a **view calling another contract's view**, and a
@@ -564,35 +603,44 @@ The stored ruling is keyed by `(policy_version, payload)`, so it resolves only f
 the exact payload the evidence run used:
 
 ```python
-GOOD = {"word_count": 500, "language": "English", "has_tests": True,
-        "body": "Thanks for reviewing. Fixes an off-by-one in pagination; tests added."}
-# payload digest 9ebe4eccc2ae9a70cf4f6456a8e8302b5c08311451dd6fe3cef5742bd4a2f08a
+PASS_CANDIDATE = {
+    "body": "I would like a refund for order 44219, the item arrived broken.",
+    "channel": "email", "account_age_days": 400, "verified": True,
+}
+# payload digest 95e1ccf4bcc2fd077872a8556efaabef879d167d84353b58e17ac329ea416a30
 ```
 
 Against the deployed contracts this returns:
 
 ```
-policy.status()          -> compiled: true, policy_version: 1, ruling_count: 1,
-                            policy_digest: eb930c47...9aae
-policy.program()         -> the three predicates above, plus {"id":"4","kind":"residual"}
-policy.evaluate(GOOD)    -> {"verdict":"RESIDUAL_REQUIRED","residual":["4"]}
-policy.ruling_for(GOOD)  -> {"rulings":[{"id":"4","satisfied":true}],
-                             "stale":false,"verdict":"PASS"}
-vault.preview(GOOD)      -> "PASS"
-vault.status()           -> released: true, held: 0, last_verdict: "PASS"
+policy.status()                    -> compiled: true, policy_version: 1, ruling_count: 2,
+                                      policy_digest: dc39e506...86db
+policy.evaluate(PASS_CANDIDATE)    -> {"verdict":"RESIDUAL_REQUIRED","residual":["6"]}
+policy.ruling_for(PASS_CANDIDATE)  -> {"rulings":[{"id":"6","satisfied":true}],
+                                       "stale":false,"verdict":"PASS"}
+vault.preview(PASS_CANDIDATE)      -> "PASS"
+vault.status()                     -> released: true, held: 0, last_verdict: "PASS"
 ```
 
-Substituting `word_count: 10` returns `{"verdict":"FAIL","violated":["1"]}` --
+Substituting `account_age_days: 3` returns `{"verdict":"FAIL","violated":["4"]}` --
 deterministic enforcement readable on-chain with no model in the loop.
 
-### Superseded deployment (history, not current evidence)
+### Superseded deployments (history, not current evidence)
 
-The first deployment implemented the earlier design in which a residual clause
-carried compiler-authored wording. That design was rejected for the reason set out
-in "Residual clauses are bound to the immutable rule", and the contracts are not
-upgradable, so it was replaced rather than patched. These identifiers are retained
-only so the record is complete. **They must not be cited as evidence for the current
-contract.**
+Earlier deployments, retained only so the record is complete. The contracts are
+not upgradable, so each design change meant a fresh deployment rather than a
+patch. **None of these may be cited as evidence for the current contract.**
+
+| Superseded | Identifier | Why |
+|---|---|---|
+| CompiledPolicy | `0x8a0535eD57C455ADD0acB20206AAF1582730AD13` | ran the probe-based gate 3, before exact equivalence |
+| CompiledPolicy | `0x7e5a1c70b2640E20E91b827781EfA086b3BFF596` | current source, but its rule reaches no `contains` atom |
+| CompiledPolicy | `0x31472799Aa03c06F1d644cBbC872bdea50b9E7B9` | current source, superseded by the canonical rule above |
+| GatedVault | `0x660DcE4B754744100cF04012a45B3DA07798b60c`, `0x693dA1EE2B2c0a055162f585463e9F4aC6F3c85D` | bound to superseded policies |
+
+The first deployment of all implemented the earlier design in which a residual
+clause carried compiler-authored wording. That design was rejected for the reason
+set out in "Residual clauses are bound to the immutable rule".
 
 | Superseded | Identifier |
 |---|---|

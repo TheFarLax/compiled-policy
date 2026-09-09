@@ -82,22 +82,42 @@ policing it.
 **Reuse.** `policy.view().evaluate(payload)` from any contract's deterministic
 region; gate on `PASS`.
 
-**Verified live.** CompiledPolicy `0x8a0535eD57C455ADD0acB20206AAF1582730AD13`,
-digest `eb930c478c1d1405a5454533608e39054ba6d86af7447dfba7cf4b12f21f9aae`, v1.
-Compile tx `0x027f06920fe51162c24c9d68c9bcede55337709b0791bb088931c3558e84b4c6` and
-adjudication tx `0x4028add0ed17c5883cc2ef8657502838b62466b57ea74a75343068d12494a41b`,
-both FINALIZED. The deployed code was fetched with `gen_getContractCode` and is
-byte-identical to `contracts/compiled_policy.py`. A real model emitted the residual
-clause as `{"id":"4","kind":"residual"}` with no extra field. The earlier policy at
-`0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294` is **superseded**.
+### Canonical deployment (Studionet)
 
-> **The addresses above run the earlier contract.** Gate 3 has since been
-> replaced with the exhaustive proof described above and `len` removed from the
-> grammar. The current source has been exercised on Studionet — a full 6/6
-> integration suite, 308s, real model, real validator set, in which a real
-> compilation was admitted through the exhaustive gate — but the resulting
-> contracts were disposable test deployments, not published addresses. Nothing
-> here is a durable deployment of the current verifier.
+The showcase deployment of this source. Both contracts run the code in this
+repository at commit `4a090fc`, fetched back with `gen_getContractCode` and
+compared byte for byte.
+
+| | |
+|---|---|
+| CompiledPolicy | `0xbfb3B521FA3d8104BBb7A1aA388Bb5A1Ce435f1C` |
+| GatedVault | `0x2c5895Bc7e6146c6633c4727247b8a0b0F6b850b` |
+| policy digest | `dc39e5060d7f3f8f518f4516aca773225e5893650004594b78367730b27486db`, v1 |
+| deploy tx | `0x4ccf2d124eac55a6639b7e5125d6bc5410804e18c8d76e3f8821f68572b1842f` |
+| compile tx | `0xe2a74aee28b83a7c8dac8bccd1193bae1b138e45a1565676da0778d8dec4659c` |
+| `compiled_policy.py` | sha256 `2a8c6cfba3eeb57212217bb2772e73d2c9a8189e59512102f071feaded11e407` |
+| `gated_vault.py` | sha256 `328e2d8b9389bae418b578194e3a3d99bb539c9597e1a705c1560df3454256c2` |
+
+The rule is a six-clause refund-triage policy. A real model mechanised five
+clauses and left one residual, exercising `contains` (`body` mentions *refund*),
+`contains` under `or` (*invoice* or *order*), string set membership (`channel in
+{email, web}`), an int comparison (`account_age_days ge 30`) and a bool
+comparison (`verified eq true`); the tone clause came back as
+`{"id":"6","kind":"residual"}` with no extra field. Every compile and
+adjudication ran with `leader_only=false` against a five-validator set with zero
+disagreements. Exact equivalence needed 14 abstract states against caps of
+2048 per clause and 16384 total.
+
+Live behaviour on chain: each of the five mechanised clauses was individually
+violated by a targeted payload and named alone in `violated`; an abusive but
+mechanically clean payload reached `RESIDUAL_REQUIRED` and was ruled `FAIL` on
+the tone clause, which is the residual binding working end to end. The vault
+refused a failing release, released on the adjudicated payload, refused a second
+release, and paid out. Full evidence is in DECISIONS.md.
+
+Earlier addresses — `0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294`,
+`0x8a0535eD57C455ADD0acB20206AAF1582730AD13`, `0x7e5a1c70b2640E20E91b827781EfA086b3BFF596`
+and `0x31472799Aa03c06F1d644cBbC872bdea50b9E7B9` — are **superseded**.
 
 **Limits.** The equivalence proof is exhaustive **for the declared grammar** —
 `and`/`or`/`not`, `cmp`, `in`, `contains`, over `int`/`str`/`bool` fields — and

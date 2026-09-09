@@ -6,6 +6,63 @@ Newest first. Not a changelog; git history covers that.
 
 ---
 
+## 2026-09-09 -- canonical deployment: one policy exercising the whole grammar
+
+**Result.** The showcase deployment. One CompiledPolicy carrying a single
+coherent rule that reaches every capability the contract implements, and one
+GatedVault bound to it. Source unchanged from `4a090fc`; this entry records a
+deployment, not a code change.
+
+| | |
+|---|---|
+| CompiledPolicy | `0xbfb3B521FA3d8104BBb7A1aA388Bb5A1Ce435f1C` |
+| GatedVault | `0x2c5895Bc7e6146c6633c4727247b8a0b0F6b850b` |
+| policy digest | `dc39e5060d7f3f8f518f4516aca773225e5893650004594b78367730b27486db`, v1 |
+| policy owner | `0x42586C842f87cFd2b4f5a34Af4F21b7906ed2ae3` |
+| vault owner / beneficiary | `0xd62D9941b7782ea0c13Ce38B97EFcee95da6a3Dc` |
+
+Transactions, all `ACCEPTED`, all `leader_only=false`, all one round, five
+validators, **zero disagreements** throughout:
+
+| step | tx |
+|---|---|
+| policy deploy | `0x4ccf2d124eac55a6639b7e5125d6bc5410804e18c8d76e3f8821f68572b1842f` |
+| compile | `0xe2a74aee28b83a7c8dac8bccd1193bae1b138e45a1565676da0778d8dec4659c` |
+| adjudicate (polite payload) | `0x577aac7ebf9d56bda6e3555fdeac408b8220f7dc9138717320f6a0f6fe9cbf20` |
+| adjudicate again (idempotent) | `0xdb878c1231f37ea52f3db05e4ac85a6e44fd0e29952eafa75295f959302c6008` |
+| adjudicate (abusive payload) | `0x80f50ce80ccd8795d631d9741eead488d01434072c354b0f432cbd51e8adc0f2` |
+| vault deploy | `0x1c8f6ada0af6a7834a9434e84b674d774a0f95e044f0f1e47329c8bcd4bc4ecd` |
+| vault fund (1000) | `0x3e64b98c82856b8fc313566ab3ce7dede54a47c5ed858fef584182ad39402345` |
+| release refused | `0x79e229315feccbbf281437111fb3f9dd34e48e53fb5e7dacdb0e2d3834aa5b85` |
+| release succeeded | `0x344581df9ecee168c25544eb1202897089ce1432191be15a8ffa794262d0eb50` |
+| second release refused | `0xfbc3e0f1c2384d877b620245fe8b77872babbe80a22179bb873825de8c72dca9` |
+| withdraw | `0x6d75f78d088a32819830a052281e8b11b90a4b8e029ef7c7818b43408531a4ad` |
+
+**The model chose `in` where the rule said "or".** Clause 2 is prose — *"must
+arrive through either the email channel or the web channel"* — and the compiler
+emitted `in(channel, ["email","web"])` rather than `or(cmp eq, cmp eq)`. Both are
+in the closed grammar, both are exactly abstracted, and the two are behaviourally
+identical, so the equivalence proof treats them as the same program. Worth
+recording because it is a reminder that the contract admits *behaviour*, not a
+syntactic template: a check that pins the expected shape rather than the expected
+semantics will report a false failure. Ours did, once, and the check was wrong.
+
+**Residual binding, demonstrated rather than argued.** Two payloads differing
+only in tone were put through the same mechanised clauses. The polite one was
+ruled `PASS` on clause 6, the abusive one `FAIL` — and since nothing mechanical
+separates them, the only thing that could have produced the difference is the
+clause text read back from `self.clauses`. The vault then refused the abusive
+payload with `RESIDUAL_FAIL` through `preview`, which is the whole binding chain
+visible from outside the contract.
+
+**Cost of the proof on a realistic rule.** 14 abstract states — 2, 3, 4, 3, 2
+across the five mechanised clauses — against caps of 2048 per clause and 16384
+total. The `contains` families are what matter: clause 3 carries two patterns on
+one field and costs 4 states, and the width is exponential in patterns per
+field, which is why `_MAX_CONTAINS_PER_FIELD` exists.
+
+---
+
 ## 2026-08-30 -- the residual-binding fix verified live; previous deployment superseded
 
 **Result.** The fixed contract was deployed fresh to Studionet and the complete
@@ -742,10 +799,12 @@ recorded in that entry; what remains open is below.
 - **Practical prompt/criteria size ceiling** on this runner. Unpublished, and the
   compile prompt embeds the full rule, schema and acceptance vectors, so a large
   rule could hit an undocumented limit.
-- **The equivalence proof has one live data point, not a rate.** A 6/6 Studionet
-  suite (308s, real model, real validator set) admitted a real compilation
-  through the exhaustive gate, so the prover demonstrably accepts real model
-  output on this rule. What remains unquantified is operational, not logical:
+- **The equivalence proof has a handful of live data points, not a rate.** Three
+  distinct rules have been compiled and admitted on Studionet through the
+  exhaustive gate with real models and real validator sets, the last reaching
+  `contains` and `contains` under `or` at 14 abstract states. So the prover
+  demonstrably accepts real model output on more than one rule shape. What
+  remains unquantified is operational, not logical:
   how *often* two independent compilations of an arbitrary rule are provably
   equivalent, and whether the state budget is generous enough for the programs a
   model emits for a larger rule. The failure mode if not is a refused
