@@ -117,7 +117,9 @@ def test_the_admitted_program_stays_inside_the_grammar(compiled_policy):
     program = json.loads(compiled_policy.program(args=[]).call())
     ids = sorted(c["id"] for c in program["clauses"])
     assert ids == ["1", "2", "3", "4"]
-    allowed_ops = {"and", "or", "not", "cmp", "in", "contains", "len"}
+    # The whole grammar. `len` was removed: its equivalence classes could not be
+    # enumerated exactly, and the verifier admits nothing it cannot prove.
+    allowed_ops = {"and", "or", "not", "cmp", "in", "contains"}
     field_names = {f["name"] for f in SCHEMA}
 
     def walk(node):

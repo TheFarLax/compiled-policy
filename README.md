@@ -39,9 +39,10 @@ and it is the only part of the system that is.
 - Compiled off-chain, the program is one party's reading of the rule, and every
   consumer has to trust that party. There is no artefact a chain can check.
 - On GenLayer, each validator independently compiles the same prose and the two
-  programs must agree **behaviourally** — identical verdicts across a probe set
-  derived from both programs. That is semantic equivalence of independently
-  generated code, decided by execution rather than by opinion.
+  programs must agree **behaviourally** — clause for clause, on every payload the
+  declared schema admits, established by exhaustive execution over a finite
+  abstraction rather than by sampling. That is semantic equivalence of
+  independently generated code, decided by execution rather than by opinion.
 
 Everything after admission is ordinary deterministic computation, which is
 exactly where it belongs. GenLayer is used for the one step that needs it.
@@ -68,21 +69,48 @@ Every vector marked `FAIL` must fail **mechanically** — reaching
 every hard case to a later judgement instead of implementing the clause. This is
 the layer that makes an over-permissive program unrepresentable.
 
-**3. Differential — deterministic comparison of two nondeterministic outputs.**
+**3. Differential — an exhaustive proof, not a sample.**
 The validator compiles its **own** program from the same prose, requires the same
-mechanised/residual split, and then compares verdict vectors over a probe set
-built from the literals of *both* programs (each integer literal contributes
-`v-1, v, v+1`; string literals contribute themselves and a near-miss; `len`
-bounds contribute strings that straddle them). Programs that differ in shape but
-not in behaviour agree. Programs that differ anywhere near a literal do not.
+mechanised/residual split, and then **proves** the two programs agree.
+
+The proof does not compare a finite sample of payloads. For each clause id, it
+takes the atoms of *both* programs over each field and builds an exact finite
+abstraction of that field's behaviour:
+
+| field | classes | count |
+|---|---|---|
+| `bool` | the domain itself | 2 |
+| `int` | the partition of ℤ induced by the mentioned constants: below the minimum, each constant, each non-empty gap, above the maximum | ≤ 2·k+1 |
+| `str` | one per distinct **normalised** literal, plus one per *realisable* set of mentioned `contains` patterns | — |
+
+Every atom in the grammar is constant across each class, so the Cartesian product
+of the classes covers every payload the schema admits. Both clauses are executed
+on every product element; any disagreement rejects. Programs that differ in shape
+but not in behaviour agree. Programs that differ **anywhere**, on any payload,
+do not — not merely near a literal.
+
+If the product does not fit a fixed state budget, the compilation is **rejected
+rather than approximated**. The caps are resource limits, never accuracy limits,
+and there is no path from "too big to prove" to "accepted": exact proof or
+refusal.
 
 Why layer 3 earns its keep: a compilation of *"at least 200 words"* as
 `word_count >= 150` satisfies every acceptance vector — the `FAIL` vector has 10
 words and still fails, the `PASS` vector has 500 and still passes. Only an
 independent compilation compared at the boundary notices that the two programs
 disagree for any submission between 150 and 199 words. That case is
-`test_validator_rejects_a_threshold_the_acceptance_vectors_cannot_catch`, and it
-is the reason this design exists.
+`test_validator_rejects_a_threshold_the_acceptance_vectors_cannot_catch`.
+
+Why it is a *proof* and not a probe set: `word_count >= 200` and
+`word_count >= 200 and word_count != 300` differ on exactly one integer. The
+sampling scheme this design replaced generated 18 probes for that pair and
+returned identical verdicts for all of them — it even tried 300, twice, but only
+alongside a field value that made another clause fail and mask the difference.
+That specimen is
+`tests/proof/test_reviewer_objection.py::test_the_probe_mechanism_could_not_separate_two_conflicting_programs`,
+which runs the deleted probe generator to show the failure, and
+`test_the_exact_verifier_rejects_what_the_probe_set_admitted`, which shows the
+replacement rejecting it.
 
 The second consensus round, `adjudicate()`, is comparative in the same spirit:
 the validator independently re-judges the residual clauses and the per-clause
@@ -149,15 +177,29 @@ constants.
 {"op":"cmp","field":F,"rel":R,"value":L}     int: eq ne lt le gt ge
                                              str/bool: eq ne only
 {"op":"in","field":F,"values":[L,...]}       int or str fields
-{"op":"contains","field":F,"value":"text"}   str fields
-{"op":"len","field":F,"rel":R,"value":N}     str fields, N >= 0
+{"op":"contains","field":F,"value":"text"}   str fields, non-blank
 ```
+
+That is the whole grammar. It is this small because every operator in it has to
+be provable: layer 3 admits nothing whose equivalence classes it cannot
+enumerate exactly.
+
+**`len` was removed.** It was the one operator that read the *raw* string while
+`cmp`, `in` and `contains` all read the normalised one, so a string's behaviour
+was no longer determined by `_norm(x)` and the string classes above stopped being
+complete. Unicode makes this concrete rather than theoretical: `str.lower()` is
+not length-preserving, so `len` and the normalised operators cannot be given one
+shared set of representatives. Sampling around length bounds papered over that;
+proving does not, so the operator went rather than the proof.
 
 There is **no true/false literal**. Every predicate must reference a declared
 field, which is what lets the acceptance vectors catch an over-permissive
 compilation. Field kinds are `int`, `str`, `bool`; literals must match the kind
 exactly (an `int` field rejects `true`, since `bool` subclasses `int` in Python).
-Caps: depth 5, 48 nodes, 16 clauses, 8 fields, 12 vectors, 96 probes.
+A `contains` literal that is blank after normalisation is rejected too: `""` is a
+substring of everything, so it would be a constant-true node by the back door.
+Caps: depth 5, 48 nodes, 16 clauses, 8 fields, 12 vectors; 2048 proof states per
+clause and 16384 in total.
 
 String comparison uses one declared normalisation — lowercase, collapse
 whitespace, strip — applied to both sides, so `"  ENGLISH  "` matches `"English"`
@@ -326,10 +368,18 @@ Direct mode is the default: in-process, no network, no model, no Docker.
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt        # genlayer-test==0.29.2, genvm-linter==0.11.0
-pytest -q                  # 71 tests, ~10 seconds
+pytest -q                  # 105 tests, ~15 seconds
 genvm-lint check contracts/compiled_policy.py
 genvm-lint check contracts/gated_vault.py
+python tools/mutation_check.py             # optional; ~2 minutes
 ```
+
+The default run covers two suites. `tests/direct` drives the contract through the
+GenVM direct-mode runner. `tests/proof` loads `contracts/compiled_policy.py` as a
+plain module and checks the equivalence abstraction against a brute-forced
+payload space — a completeness claim cannot be tested through the public API
+alone. `tools/mutation_check.py` mutates the verifier and checks the suite
+notices; see "The proof, and how it is tested" below.
 
 Tool versions are pinned exactly, because newer genvm releases changed the runner
 layout both tools use to resolve an SDK. The first `pytest` run downloads roughly
@@ -376,6 +426,48 @@ Agreement and disagreement are both covered:
 | a mechanisable clause moved to residual | rejects — split disagrees |
 | leader result malformed / not JSON | rejects |
 | leader errored where the validator did not | rejects, forcing leader rotation |
+| `x >= 200` vs `x >= 200 and x != 300` | **rejects** — one integer apart; the old probe set could not see this |
+| clause 1 widened only where clause 3 already fails | **rejects** — the verdict is identical on *every* payload |
+| a program too large to prove | rejects at compile time, rather than approximating |
+
+## The proof, and how it is tested
+
+The equivalence check makes the strongest claim in this repository, so it is the
+most heavily tested thing in it. Three independent lines of evidence, all
+reproducible with `pytest -q` and `python tools/mutation_check.py`:
+
+**1. The abstraction is checked against brute force, not argued.**
+`tests/proof/test_abstraction.py` generates random clause pairs — deliberately
+biased towards near-misses, since half of each pair is a mutation of the other —
+and decides each one twice: once with `_prove_equivalent` over its abstract
+states, and once by enumerating a concrete payload space with the contract's own
+`_clause_satisfied`. Measured over the three seeds the suite ships with: **660
+clause pairs against 7,678 concrete payloads each — 193 proved equivalent, 467
+proved different, zero false accepts and zero false rejects.** A false accept
+would be the vulnerability; a false reject would mean the abstraction is merely
+sound rather than exact. Neither occurs.
+
+**2. The reviewer's objection is reproduced, then answered.**
+`tests/proof/test_reviewer_objection.py` keeps a frozen verbatim copy of the
+*deleted* probe generator and runs it, so the flaw is demonstrated rather than
+described: for `word_count >= 200` against `word_count >= 200 and word_count !=
+300`, the old mechanism produced 18 probes and **identical verdict vectors**. It
+did generate `word_count == 300` — twice — but only paired with `has_tests:
+false`, where another clause already forced `FAIL` and masked the difference.
+More probes would not have helped. The same file's second specimen widens a
+clause only where another clause already fails, so the whole-program verdict is
+identical on *every* payload in existence; no verdict-vector comparison of any
+size could ever catch it, which is why the proof compares clauses rather than
+verdicts.
+
+**3. The tests are mutation-tested.** `tools/mutation_check.py` injects six
+deliberate faults into the verifier — a dropped integer boundary cell, a
+representative that no longer equals its literal, substring closure computed in
+the wrong direction, `forbid` ignored, clauses matched by position instead of by
+id, and a one-sided comparison — restores the file afterwards, and reports which
+tests noticed. **All six are caught.** Five of the six are caught by the
+brute-force cross-check itself; clause matching is a whole-program property, and
+twelve other tests catch that one.
 
 The residual binding has its own regression tests, and they were **mutation-tested**
 to prove they detect the old vulnerable behaviour rather than passing incidentally:
@@ -400,15 +492,32 @@ gltest --network studionet tests/integration
 Both suites have been run against the current source. Stated precisely, because the
 distinction matters.
 
-**Direct mode -- 71 tests, ~10s, no network, no model.** Covers the deterministic
+**Direct mode -- 79 tests, ~13s, no network, no model.** Covers the deterministic
 core, all five verdicts, the three structural/behavioural gates, versioning, access
 control, idempotency, digest binding, the residual-binding regression tests, and
 validator agreement *and* disagreement via `run_validator()`.
 
+**Proof suite -- 26 tests, ~3s.** The exactness of the equivalence abstraction,
+checked against a brute-forced payload space, plus the reviewer's objection
+reproduced against the deleted probe generator. See "The proof, and how it is
+tested".
+
+**Mutation testing -- 6 injected faults, all caught**, via
+`python tools/mutation_check.py` (~2 minutes; restores the contract byte for byte).
+
 **Studionet -- 6 integration tests, three consecutive green suites** (245s, 220s,
 223s) against `https://studio.genlayer.com/api` (chain id `61999`) with a real model
 and a real validator set, plus a separate evidence run that captured the lifecycle
-below. Zero skips, zero assertion failures.
+below. Zero skips, zero assertion failures. Those three runs exercised the
+earlier, probe-based gate 3.
+
+**Studionet against the exhaustive proof — 6/6 green, 308s.** The current source,
+`len` removed and gate 3 replaced, re-run end to end on `studionet` with a real
+model and a real validator set (not leader-only). A real compilation was admitted
+through the exhaustive equivalence gate, stayed inside the reduced grammar, was
+refused on re-admission of an identical program, and drove the vault release
+lifecycle. One rule, one run: it shows the prover accepts real model output, not
+how often it does.
 
 ### Live evidence (current)
 
@@ -508,9 +617,12 @@ contract.**
   suites plus one evidence run is four data points on one rule with one validator mix.
   A different model, mix or rule could fail to compile -- and the honest failure mode
   is a *rejected* compilation, never a bad admission.
-- **Behavioural equivalence is probe-bounded** (at most 96 deterministic probes), so
-  it is checked, not proven. Two programs differing only on a combination no probe
-  reaches would be treated as equivalent.
+- **The equivalence proof has been exercised on Studionet once, not repeatedly.**
+  One green 6/6 integration suite compiled the running-example rule with a real
+  model and a real validator set through the exhaustive gate. That is one data
+  point on one rule: it shows real model output *can* be admitted by the prover,
+  not how often it is. The honest failure mode if a compilation is not provable
+  is a refused compilation, never a bad admission.
 - **`gen_call` rejects string arguments above roughly 200 bytes** with an RLP
   length-prefix error. This is a client/node bug, not a contract one -- the same
   argument passes through the write path and through a contract-to-contract call --
@@ -544,7 +656,9 @@ suite fail to load, so it was not adopted. See `DECISIONS.md`.
 ```
 contracts/compiled_policy.py   the primitive
 contracts/gated_vault.py       minimal reference consumer (not a second primitive)
-tests/direct/                  71 tests: no network, no model, ~10s
+tests/direct/                  79 tests: no network, no model, ~13s
+tests/proof/                   26 tests: the equivalence abstraction vs brute force
+tools/mutation_check.py        injects 6 faults into the verifier; all caught
 tests/integration/             6 Studionet tests (3 green suites; see Verification status)
 CONTRACT.md                    one-page specification
 DECISIONS.md                   design record and live runner findings
@@ -561,11 +675,20 @@ Stated because they are real, not because they are comfortable.
   far larger arguments without trouble. It was isolated with a size sweep; the
   evidence is in `DECISIONS.md`. Keep RPC-facing payloads small until it is fixed
   upstream. The primary reuse path (contract-to-contract) showed no such limit.
-- **Behavioural equivalence is checked on a bounded probe set, not proven.** The
-  probes are boundary values around every literal in both programs plus a
-  lockstep sweep, capped at 96. Two programs that differ only on an input
-  combination no probe reaches would be treated as equivalent. Adding an
-  exhaustive check is not possible in general; widening the probe set is.
+- **Behavioural equivalence is proven exhaustively — but only for the declared
+  grammar.** Validators do not compare a finite sample of payloads. They
+  construct an exact finite abstraction of the supported payload semantics and
+  compare the two independently generated programs over every abstract state; if
+  the abstraction exceeds the bounded resource limit, the compilation is rejected
+  rather than approximated. The claim is scoped to the operators listed above and
+  is not a claim about program equivalence in general. It rests on those
+  operators reading only a declared field's value (through `_norm` for strings),
+  which is why adding an operator means extending the abstraction first — and why
+  `len` was removed instead of grandfathered.
+- **An expressive but legal program can be refused.** A clause whose abstraction
+  exceeds 2048 states, or a string field carrying more than 10 `contains`
+  patterns, is rejected. That is the fail-closed side of the same rule: the
+  verifier admits only what it can prove.
 - **Residual clauses fall back to per-payload judgement**, so a rule that is
   mostly subjective gets little benefit. A program that mechanises nothing is
   refused outright rather than pretending. And with a small payload there may be

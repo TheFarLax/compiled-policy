@@ -27,13 +27,25 @@ Three gates, in this order:
    mechanised clause.
 2. **Behavioural, deterministic.** Every acceptance vector marked `FAIL` must
    fail mechanically; every `PASS` vector must not fail.
-3. **Differential, deterministic.** Validator compiles independently, requires an
-   identical mechanised/residual split, and compares verdict vectors over a probe
-   set derived from the literals of both programs.
+3. **Differential, deterministic, exhaustive.** Validator compiles independently,
+   requires an identical mechanised/residual split, and then *proves* the two
+   programs behave identically — clause for clause, on every payload the declared
+   schema admits.
 
-All three run inside the validator *and* again in the deterministic region after
-consensus returns, so an admitted program passed every gate on every node that
-looked at it.
+   This gate does **not** compare a finite sample of payloads. It constructs an
+   exact finite abstraction of the supported payload semantics — one
+   representative per behavioural equivalence class of each field, derived from
+   the atoms of *both* programs — and compares the two programs exhaustively over
+   every abstract state. Agreement on every abstract state is agreement on every
+   payload, for the operators the grammar admits. If the abstraction does not fit
+   the verifier's bounded resource limit, the compilation is **rejected rather
+   than approximated**. There is no fallback to sampling.
+
+Gates 1 and 2, and the constructibility of gate 3's abstraction, run inside the
+validator *and* again in the deterministic region after consensus returns, so an
+admitted program passed them on every node that looked at it. The comparison in
+gate 3 needs two independently compiled programs and therefore runs only inside a
+validator.
 
 **Residual clauses are bound to the immutable rule.** A residual declaration is
 `{"id", "kind"}` and nothing else; `adjudicate()` reads the text it judges back from
@@ -79,9 +91,24 @@ byte-identical to `contracts/compiled_policy.py`. A real model emitted the resid
 clause as `{"id":"4","kind":"residual"}` with no extra field. The earlier policy at
 `0x9B4C7d682D1a89C53cb2Dc5aF1359e5cb33DF294` is **superseded**.
 
-**Limits.** Behavioural equivalence is probe-bounded, not proven. Subjective
-rules degrade to per-payload adjudication. The prose rule cannot be amended after
-deployment. `evaluate()` cost grows with program size, which the node cap bounds.
+> **The addresses above run the earlier contract.** Gate 3 has since been
+> replaced with the exhaustive proof described above and `len` removed from the
+> grammar. The current source has been exercised on Studionet — a full 6/6
+> integration suite, 308s, real model, real validator set, in which a real
+> compilation was admitted through the exhaustive gate — but the resulting
+> contracts were disposable test deployments, not published addresses. Nothing
+> here is a durable deployment of the current verifier.
+
+**Limits.** The equivalence proof is exhaustive **for the declared grammar** —
+`and`/`or`/`not`, `cmp`, `in`, `contains`, over `int`/`str`/`bool` fields — and
+claims nothing beyond it. Its completeness rests on those operators reading only
+the value of a declared field, through `_norm` in the string case; an operator
+that read a string some other way would need its own equivalence classes before
+it could be admitted, which is why `len` was removed. Expressive programs can
+exceed the state budget and be refused even though they are legal and correct.
+Subjective rules still degrade to per-payload adjudication, and that path is
+LLM-judged, not proved. The prose rule cannot be amended after deployment.
+`evaluate()` cost grows with program size, which the node cap bounds.
 
 **Deployment precondition.** Gate 3 is the only one that cannot be re-checked
 after consensus, because it needs a second independent compilation. On a

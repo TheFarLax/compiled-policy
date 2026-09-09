@@ -21,8 +21,9 @@ WHY CONSENSUS IS REQUIRED
   is. Compiled off-chain it would be one party's reading of the rule, which
   every consumer would have to trust. Here, each validator independently
   compiles the same prose and the two programs must agree BEHAVIOURALLY --
-  identical verdicts across a probe set derived from both programs. Semantic
-  equivalence of independently generated code, checked by execution.
+  clause for clause, on EVERY payload the declared schema admits. Semantic
+  equivalence of independently generated code, settled by exhaustive execution
+  over a finite abstraction rather than by sampling.
 
 HOW THE LEADER IS CHECKED (three layers, only one of them a judgement)
   1. STRUCTURAL, deterministic. The program must parse into the whitelisted
@@ -33,20 +34,35 @@ HOW THE LEADER IS CHECKED (three layers, only one of them a judgement)
      acceptance vectors fixed at deploy time. Every vector marked FAIL must
      fail MECHANICALLY. An over-permissive program -- the whole attack -- is
      rejected by code before any judgement is consulted.
-  3. DIFFERENTIAL, deterministic comparison of two nondeterministic outputs.
-     The validator compiles its own program and compares verdict vectors over
-     a probe set built from the literals of both programs. Differently shaped
-     but equivalent programs agree; genuinely different ones do not.
+  3. DIFFERENTIAL, deterministic, and EXHAUSTIVE. The validator compiles its
+     own program and PROVES the two agree, clause by clause, on every payload
+     the schema admits -- not on a sample of them.
+
+     The proof works by abstraction. Within this closed grammar every atom over
+     a field is invariant across a cell of that field's value space: an int atom
+     cannot separate two integers that sit strictly between the same pair of
+     mentioned constants, and a str atom cannot separate two strings that
+     normalise to the same equality class and contain the same set of mentioned
+     patterns. Each field therefore has a finite, exactly enumerable set of
+     equivalence classes, computed from the literals of BOTH programs. Their
+     Cartesian product is a finite set of abstract states that COVERS the whole
+     payload space, and the two programs are executed on every one of them.
+
+     Agreement on every abstract state is agreement on every payload. There is
+     no sampling anywhere in this path, and no fallback to sampling: if the
+     abstraction cannot be built inside a fixed resource bound, the compilation
+     is REJECTED rather than approximated. Exact proof or refusal.
 
   The validator never inspects the leader's output for "valid JSON shape and
   an allowed label". It re-does the work and compares behaviour.
 
   LAYER 3 NEEDS MORE THAN ONE VALIDATOR. Layers 1 and 2 are deterministic and are
-  re-run here after consensus returns. Layer 3 cannot be: it requires a second
-  independent compilation, which only a validator can produce. On a leader-only
-  network the differential check therefore never runs, and a program that passes
-  the acceptance vectors but is subtly wrong would be admitted. Deploy only where
-  a real validator set participates.
+  re-run here after consensus returns, as is the constructibility of the
+  abstraction. The comparison itself cannot be: it requires a second independent
+  compilation, which only a validator can produce. On a leader-only network the
+  differential check therefore never runs, and a program that passes the
+  acceptance vectors but is subtly wrong would be admitted. Deploy only where a
+  real validator set participates.
 
   A rejection from any layer is raised with an [LLM_ERROR] prefix, on which the
   validator always disagrees. With only a leader that surfaces as a clean revert;
@@ -127,8 +143,15 @@ def require(condition: bool, message: str) -> None:
 # ------------------------------------------------------------- grammar & limits
 # The whitelist IS the security boundary. Nothing in the prose rule, and nothing
 # the model emits, can widen it -- these are code constants.
+#
+# THE GRAMMAR IS CLOSED SO THAT EQUIVALENCE IS PROVABLE. Every operator here is
+# invariant across a finite, exactly enumerable partition of its field's value
+# space, which is what lets two independent compilations be compared over the
+# WHOLE payload space instead of over a sample. An operator that broke that
+# property would have to be rejected on those grounds alone -- see the note on
+# `len` below.
 _KINDS = ("int", "str", "bool")
-_OPS = ("and", "or", "not", "cmp", "in", "contains", "len")
+_OPS = ("and", "or", "not", "cmp", "in", "contains")
 _RELS_ORD = ("eq", "ne", "lt", "le", "gt", "ge")
 _RELS_EQ = ("eq", "ne")
 _EFFECTS = ("require", "forbid")
@@ -142,12 +165,35 @@ _MAX_NODES = 48
 _MAX_DEPTH = 5
 _MAX_IN = 12
 _MAX_STR = 240
-_MAX_PROBES = 96
 _MAX_PAYLOAD = 4000
+
+# Bounds on the exact verification space. These are a RESOURCE limit, never an
+# accuracy one: a program whose abstraction does not fit is refused, not checked
+# approximately. See `_prove_equivalent`.
+_MAX_STATES_PER_CLAUSE = 2048
+_MAX_STATES_TOTAL = 16384
+_MAX_CONTAINS_PER_FIELD = 10
+_MAX_WITNESS_RETRIES = 4
+_WITNESS_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 # Deliberately absent from the grammar: any constant-true / constant-false node.
 # A predicate must talk about a field, which is what makes the acceptance
 # vectors able to catch an over-permissive compilation.
+#
+# Also deliberately absent: a `len` operator over strings. It was in v1 of this
+# grammar and was removed, because it is the one operator whose equivalence
+# classes cannot be enumerated with a proof. Every other string operator reads
+# the NORMALISED value, so a string's behaviour is fixed by its normal form;
+# `len` read the RAW value, decoupling the two, and Unicode case folding is not
+# length preserving (U+0130, the Turkish dotted capital I, lowercases to TWO
+# code points), so no finite set of representatives can be shown to cover the
+# length dimension. Sampling could paper over that. Proving could not, so the
+# operator went.
+#
+# This file is deliberately pure ASCII, incidentally: `gltest` fetches a
+# contract's schema by hex-encoding the source as ASCII, so a single non-ASCII
+# character anywhere in it -- including in a comment -- breaks deployment
+# through the test harness. Found the hard way; see DECISIONS.md.
 
 VERDICT_UNCOMPILED = "UNCOMPILED"
 VERDICT_INVALID = "INVALID_PAYLOAD"
@@ -259,20 +305,18 @@ def _validate_node(node, fields: dict, depth: int) -> int:
                 )
         return 1
 
-    if op == "contains":
-        require(kind == "str", ERROR_LLM + " contains requires a str field")
-        value = node.get("value")
-        require(
-            isinstance(value, str) and 0 < len(value) <= _MAX_STR,
-            ERROR_LLM + " contains needs a non-empty str literal",
-        )
-        return 1
-
-    # op == "len"
-    require(kind == "str", ERROR_LLM + " len requires a str field")
-    require(node.get("rel") in _RELS_ORD, ERROR_LLM + " bad rel for len")
+    # op == "contains"
+    require(kind == "str", ERROR_LLM + " contains requires a str field")
     value = node.get("value")
-    require(_is_int(value) and value >= 0, ERROR_LLM + " len needs a non-negative int")
+    require(
+        isinstance(value, str) and 0 < len(value) <= _MAX_STR,
+        ERROR_LLM + " contains needs a non-empty str literal",
+    )
+    # An all-whitespace literal normalises to "", which is a substring of every
+    # string -- a constant-true node by the back door. This grammar has no
+    # constant nodes, and the equivalence proof relies on that: a pattern that
+    # matches everything has no realisable "does not contain it" class.
+    require(len(_norm(value)) > 0, ERROR_LLM + " contains literal is blank after normalisation")
     return 1
 
 
@@ -343,9 +387,8 @@ def _canon_node(node) -> dict:
         return {"op": op, "field": node["field"], "rel": node["rel"], "value": node["value"]}
     if op == "in":
         return {"op": op, "field": node["field"], "values": sorted(node["values"], key=_canon)}
-    if op == "contains":
-        return {"op": op, "field": node["field"], "value": node["value"]}
-    return {"op": op, "field": node["field"], "rel": node["rel"], "value": node["value"]}
+    # op == "contains"
+    return {"op": op, "field": node["field"], "value": node["value"]}
 
 
 def _canon_program(program) -> dict:
@@ -407,9 +450,21 @@ def _eval_node(node, payload: dict) -> bool:
         if isinstance(value, str):
             return _norm(value) in [_norm(v) for v in node["values"]]
         return value in node["values"]
-    if op == "contains":
-        return _norm(node["value"]) in _norm(value)
-    return _rel(node["rel"], len(value), node["value"])
+    # op == "contains"
+    return _norm(node["value"]) in _norm(value)
+
+
+def _clause_satisfied(clause, payload: dict) -> bool:
+    """Does one mechanised clause hold for one payload? `require` demands the
+    predicate be TRUE, `forbid` demands it be FALSE.
+
+    This is the single definition of clause satisfaction. Both the enforcement
+    engine (`_eval_program`) and the equivalence proof (`_prove_equivalent`)
+    call it, so the proof cannot drift away from the semantics it claims to
+    prove -- a second, subtly different copy of this rule inside the verifier
+    would be a silent hole."""
+    holds = _eval_node(clause["predicate"], payload)
+    return holds if clause["effect"] == "require" else (not holds)
 
 
 def _eval_program(program, payload: dict) -> dict:
@@ -420,9 +475,7 @@ def _eval_program(program, payload: dict) -> dict:
         if clause["kind"] == _KIND_RESIDUAL:
             residual.append(clause["id"])
             continue
-        holds = _eval_node(clause["predicate"], payload)
-        satisfied = holds if clause["effect"] == "require" else (not holds)
-        if not satisfied:
+        if not _clause_satisfied(clause, payload):
             violated.append(clause["id"])
 
     if violated:
@@ -485,109 +538,320 @@ def _check_vectors(program, vectors) -> None:
     require(saw_fail and saw_pass, ERROR_EXPECTED + " vectors must include a PASS and a FAIL case")
 
 
-# ------------------------------------------------------- differential probing
-def _collect_candidates(program, fields: dict, out: dict) -> None:
-    """Harvest boundary values from a program's literals. Probing at these
-    points is what makes the differential comparison discriminating: two
-    programs that differ at all tend to differ next to a literal."""
-    stack = []
-    for clause in program["clauses"]:
-        if clause["kind"] == _KIND_MECH:
-            stack.append(clause["predicate"])
-
+# ================================================ EXACT EQUIVALENCE PROVING
+# This is the substantive check, and the reason the grammar is as small as it
+# is. Nothing below samples anything.
+#
+# THE ARGUMENT, in full, because the whole security claim rests on it.
+#
+#   Fix a mechanised clause id present in both programs. `_clause_satisfied`
+#   reads only the fields its predicate mentions, so the pair of clauses is a
+#   function of the values of the union of the fields they mention. For each
+#   such field, collect every atom over it from BOTH clauses. Then:
+#
+#   bool  The domain IS {True, False}. Two classes, both enumerated.
+#
+#   int   Let K be the distinct constants those atoms mention. Every int atom
+#         is `x rel k` or `x in K'` for k, K' drawn from K, so its truth value
+#         depends only on the sign of (x - k) for each k in K. Two integers
+#         with the same sign pattern are indistinguishable. The sign patterns
+#         partition Z into: below min(K); each singleton {k}; each non-empty
+#         open interval between consecutive constants; above max(K). That is at
+#         most 2|K|+1 cells, every cell is non-empty, and one representative is
+#         taken from each. Complete by construction.
+#
+#   str   `cmp` eq/ne, `in` and `contains` all read `_norm(x)` and nothing
+#         else, so a string's behaviour is fixed by the pair
+#             (which normalised literal it equals, if any,
+#              which of the mentioned patterns are substrings of it).
+#         If it equals a literal, both components are fixed by that literal, so
+#         the literal itself is a representative -- one class per distinct
+#         NORMALISED literal. If it equals none, the second component S must be
+#         substring-closed inside the pattern set (containing a pattern implies
+#         containing every mentioned pattern that is a substring of it). Every
+#         substring-closed S is enumerated, and a witness is built by joining
+#         S's maximal elements with a separator character that occurs in no
+#         pattern -- so no unwanted pattern can straddle a join. Each witness is
+#         then EXECUTED and checked to realise exactly its intended class; if
+#         one does not, the compilation is refused rather than assumed.
+#
+#   The Cartesian product of the per-field classes therefore covers every
+#   payload the schema admits. Executing both clauses on every product element
+#   and finding no disagreement IS a proof that they agree everywhere.
+#
+# The product is bounded. When it does not fit, the answer is refusal --
+# `_MAX_STATES_*` are resource limits, never accuracy limits, and there is no
+# path from "too big to prove" to "accepted".
+def _atoms_by_field(node, out: dict) -> None:
+    """Every atom of a predicate, bucketed by the field it reads."""
+    stack = [node]
     while stack:
-        node = stack.pop()
-        op = node["op"]
-        if op in ("and", "or", "not"):
-            stack.extend(node["args"])
+        current = stack.pop()
+        if current["op"] in ("and", "or", "not"):
+            stack.extend(current["args"])
             continue
-        name = node["field"]
-        kind = fields[name]
-        bucket = out.setdefault(name, [])
+        out.setdefault(current["field"], []).append(current)
+
+
+def _int_cells(atoms) -> list:
+    """One representative per cell of the exact partition of Z induced by the
+    constants these atoms mention."""
+    seen = {}
+    for atom in atoms:
+        if atom["op"] == "cmp":
+            seen[atom["value"]] = True
+        else:  # in
+            for value in atom["values"]:
+                seen[value] = True
+    constants = sorted(seen.keys())
+    if not constants:
+        return [0]
+
+    cells = [constants[0] - 1]  # below the minimum
+    for index in range(len(constants)):
+        cells.append(constants[index])  # the singleton
+        if index + 1 < len(constants) and constants[index + 1] - constants[index] >= 2:
+            cells.append(constants[index] + 1)  # the open interval, if non-empty
+    cells.append(constants[-1] + 1)  # above the maximum
+    return cells
+
+
+def _witness_separator(patterns) -> str:
+    """A character occurring in no pattern. Joining with it guarantees that no
+    pattern can span two joined parts, which is what makes a witness realise
+    exactly the containment set it was built for."""
+    for char in _WITNESS_ALPHABET:
+        used = False
+        for pattern in patterns:
+            if char in pattern:
+                used = True
+                break
+        if not used:
+            return char
+    raise gl.vm.UserError(ERROR_LLM + " no separator available to build a contains witness")
+
+
+def _str_classes(atoms) -> list:
+    """One representative per equivalence class of a str field."""
+    raw_literals = []
+    raw_patterns = []
+    for atom in atoms:
+        op = atom["op"]
         if op == "cmp":
-            if kind == "int":
-                for delta in (-1, 0, 1):
-                    bucket.append(node["value"] + delta)
-            else:
-                bucket.append(node["value"])
+            raw_literals.append(atom["value"])
         elif op == "in":
-            for value in node["values"]:
-                bucket.append(value)
-                if kind == "int":
-                    bucket.append(value + 1)
-        elif op == "contains":
-            bucket.append(node["value"])
-            bucket.append(node["value"] + " tail")
-        else:  # len -- probe strings whose length straddles the bound
-            for delta in (-1, 0, 1):
-                size = node["value"] + delta
-                if size >= 0:
-                    bucket.append("x" * min(size, _MAX_STR))
+            for value in atom["values"]:
+                raw_literals.append(value)
+        else:  # contains
+            raw_patterns.append(atom["value"])
+
+    # One class per distinct NORMALISED literal; the raw literal represents it,
+    # which sidesteps any question about whether normalisation is idempotent.
+    literal_norms = {}
+    reps = []
+    for value in sorted(raw_literals):
+        key = _norm(value)
+        if key not in literal_norms:
+            literal_norms[key] = True
+            reps.append(value)
+
+    patterns = []
+    seen_patterns = {}
+    for value in sorted(raw_patterns):
+        key = _norm(value)
+        if key not in seen_patterns:
+            seen_patterns[key] = True
+            patterns.append(key)
+    # Defence in depth. `_validate_node` already refuses a contains literal that
+    # is blank after normalisation, and every path into this function validates
+    # first -- but this layer must not depend on that. A blank pattern is a
+    # substring of every string, so it has no "does not contain it" class and
+    # the enumeration below could not represent it. Fail closed instead.
+    for value in patterns:
+        require(
+            len(value) > 0,
+            ERROR_LLM + " contains pattern is blank after normalisation",
+        )
+    require(
+        len(patterns) <= _MAX_CONTAINS_PER_FIELD,
+        ERROR_LLM
+        + " more than %d contains patterns on one field cannot be verified exactly"
+        % _MAX_CONTAINS_PER_FIELD,
+    )
+
+    # inside[j] = the patterns that are substrings of pattern j. A containment
+    # set may include j only if it also includes all of these.
+    inside = []
+    for j in range(len(patterns)):
+        row = []
+        for i in range(len(patterns)):
+            if i != j and patterns[i] in patterns[j]:
+                row.append(i)
+        inside.append(row)
+
+    separator = _witness_separator(patterns)
+    for mask in range(1 << len(patterns)):
+        members = [i for i in range(len(patterns)) if (mask >> i) & 1]
+        closed = True
+        for j in members:
+            for i in inside[j]:
+                if not ((mask >> i) & 1):
+                    closed = False
+                    break
+            if not closed:
+                break
+        if not closed:
+            continue  # not substring-closed: no string can realise it
+
+        maximal = []
+        for j in members:
+            dominated = False
+            for k in members:
+                if k != j and j in inside[k]:
+                    dominated = True
+                    break
+            if not dominated:
+                maximal.append(patterns[j])
+        target = [patterns[i] for i in members]
+
+        # Build, then EXECUTE the witness to confirm it lands in the intended
+        # class. Retrying with an extra separator resolves the only failure the
+        # construction can hit: colliding with a declared literal.
+        witness = separator.join(maximal)
+        realised = False
+        for _attempt in range(_MAX_WITNESS_RETRIES):
+            normalised = _norm(witness)
+            hit = [p for p in patterns if p in normalised]
+            if normalised not in literal_norms and hit == target:
+                realised = True
+                break
+            witness = witness + separator
+        require(realised, ERROR_LLM + " could not construct a witness for a contains class")
+        reps.append(witness)
+    return reps
 
 
-def _base_payload(fields: dict) -> dict:
+def _field_classes(kind: str, atoms) -> list:
+    if kind == "bool":
+        return [True, False]
+    if kind == "int":
+        return _int_cells(atoms)
+    return _str_classes(atoms)
+
+
+def _abstract_states(clause_a, clause_b, fields: dict) -> list:
+    """Every abstract state the two clauses could possibly be distinguished by.
+
+    Fields neither clause mentions are pinned to a default: `_eval_node` never
+    reads them, so varying them could not change either answer."""
+    atoms = {}
+    _atoms_by_field(clause_a["predicate"], atoms)
+    _atoms_by_field(clause_b["predicate"], atoms)
+    names = sorted(atoms.keys())
+
+    classes = []
+    total = 1
+    for name in names:
+        bucket = _field_classes(fields[name], atoms[name])
+        classes.append(bucket)
+        total = total * len(bucket)
+        require(
+            total <= _MAX_STATES_PER_CLAUSE,
+            ERROR_LLM
+            + " exact verification needs more than %d states for one clause"
+            % _MAX_STATES_PER_CLAUSE,
+        )
+
     base = {}
     for name, kind in fields.items():
         base[name] = 0 if kind == "int" else ("" if kind == "str" else False)
-    return base
+
+    states = [base]
+    for index in range(len(names)):
+        grown = []
+        for state in states:
+            for value in classes[index]:
+                fresh = dict(state)
+                fresh[names[index]] = value
+                grown.append(fresh)
+        states = grown
+    return states
 
 
-def _probe_payloads(fields: dict, programs, seed_payloads) -> list:
-    """A deterministic probe set: the declared acceptance vectors, the zero
-    payload, a one-field-at-a-time sweep over every harvested boundary value,
-    and a lockstep sweep that moves all fields together so conjunctions are
-    exercised too. Order is fixed and the set is capped, so the leader and the
-    validator build the identical list."""
-    candidates = {}
-    for program in programs:
-        _collect_candidates(program, fields, candidates)
-    for name, kind in fields.items():
-        bucket = candidates.setdefault(name, [])
-        if kind == "bool":
-            bucket.extend([True, False])
-        # De-duplicate on the canonical form, keeping a deterministic order so
-        # the leader and the validator build the identical probe list.
-        unique_values = {}
-        for value in bucket:
-            unique_values[_canon(value)] = value
-        candidates[name] = [unique_values[key] for key in sorted(unique_values.keys())]
+def _check_provable(program, fields: dict) -> None:
+    """Refuse a program whose exact verification space cannot be built inside
+    the budget, before it is ever admitted.
 
-    probes = list(seed_payloads)
-    base = _base_payload(fields)
-    probes.append(dict(base))
-
-    names = sorted(fields.keys())
-    for name in names:
-        for value in candidates[name]:
-            probe = dict(base)
-            probe[name] = value
-            probes.append(probe)
-
-    widest = 0
-    for name in names:
-        widest = max(widest, len(candidates[name]))
-    for index in range(min(widest, 8)):
-        probe = dict(base)
-        for name in names:
-            bucket = candidates[name]
-            if bucket:
-                probe[name] = bucket[index % len(bucket)]
-        probes.append(probe)
-
-    unique = []
-    seen = []
-    for probe in probes:
-        key = _canon(probe)
-        if key not in seen:
-            seen.append(key)
-            unique.append(probe)
-        if len(unique) >= _MAX_PROBES:
-            break
-    return unique
+    The comparison itself needs two programs and so can only run inside a
+    validator, but constructibility depends on one program alone. Checking it in
+    the leader and again after consensus turns "this program could never have
+    been proved equivalent to anything" into a clean, deterministic rejection
+    instead of a validator disagreement nobody can explain."""
+    budget = 0
+    for clause in program["clauses"]:
+        if clause["kind"] != _KIND_MECH:
+            continue
+        budget += len(_abstract_states(clause, clause, fields))
+        require(
+            budget <= _MAX_STATES_TOTAL,
+            ERROR_LLM + " exact verification needs more than %d states" % _MAX_STATES_TOTAL,
+        )
 
 
-def _verdict_vector(program, probes) -> list:
-    return [_eval_program(program, probe)["verdict"] for probe in probes]
+def _prove_equivalent(program_a, program_b, fields: dict) -> bool:
+    """PROVE that two independently compiled programs behave identically on
+    every payload the schema admits.
+
+    Per clause, not per program. Comparing whole-program verdicts would let a
+    difference hide behind another clause that already fails: if clause 3
+    rejects every payload where clauses 1 and 2 disagree, the verdict is FAIL
+    either way and the disagreement is invisible -- on every payload, not merely
+    on sampled ones. Clause-level agreement is strictly stronger and implies
+    agreement on the verdict AND on the reported `violated` list.
+
+    Three outcomes, and the caller flattens the last two:
+
+      * True  -- the exhaustive comparison completed and found no disagreement
+                 on any abstract state. This is the only path to admission.
+      * False -- the comparison completed and the two programs disagree on at
+                 least one abstract state.
+      * raise -- certification could not be COMPLETED: the abstraction exceeded
+                 `_MAX_STATES_*`, a contains witness could not be constructed,
+                 or no separator was available. Conceptually that is a refusal
+                 to certify rather than a finding of inequivalence, but
+                 `validate_compilation` catches it and returns False, so it
+                 reaches consensus as the same validator disagreement. The
+                 distinction is therefore documentary, not behavioural: both
+                 non-True outcomes refuse the compilation, which is the point.
+
+    There is no fourth branch. In particular there is no path that admits a
+    program on partial evidence when the proof cannot be finished."""
+    if _kind_signature(program_a) != _kind_signature(program_b):
+        return False
+
+    left = {}
+    right = {}
+    for clause in program_a["clauses"]:
+        if clause["kind"] == _KIND_MECH:
+            left[clause["id"]] = clause
+    for clause in program_b["clauses"]:
+        if clause["kind"] == _KIND_MECH:
+            right[clause["id"]] = clause
+    if sorted(left.keys()) != sorted(right.keys()):
+        return False
+
+    budget = 0
+    for cid in sorted(left.keys()):
+        states = _abstract_states(left[cid], right[cid], fields)
+        budget += len(states)
+        require(
+            budget <= _MAX_STATES_TOTAL,
+            ERROR_LLM + " exact verification needs more than %d states" % _MAX_STATES_TOTAL,
+        )
+        for state in states:
+            if _clause_satisfied(left[cid], state) != _clause_satisfied(right[cid], state):
+                return False
+    return True
 
 
 def _kind_signature(program) -> str:
@@ -627,11 +891,16 @@ _GRAMMAR_SPEC = """A predicate node is one of:
   {"op":"cmp","field":F,"rel":R,"value":L}     int fields: eq ne lt le gt ge
                                                str/bool fields: eq ne only
   {"op":"in","field":F,"values":[L,...]}       int or str fields
-  {"op":"contains","field":F,"value":"text"}   str fields; case/space insensitive
-  {"op":"len","field":F,"rel":R,"value":N}     str fields; N >= 0
-There is no true/false literal: every predicate must reference a declared field.
+  {"op":"contains","field":F,"value":"text"}   str fields; case/space insensitive,
+                                               and the text may not be blank
+There is no string-length operator and no true/false literal: every predicate
+must reference a declared field, and these are all the operators there are.
 Literals must match the field kind exactly (an int field needs an int).
-Maximum nesting depth 5, maximum 48 nodes across the whole program."""
+Maximum nesting depth 5, maximum 48 nodes across the whole program.
+Every clause you emit is verified EXHAUSTIVELY against an independently compiled
+one, so prefer the smallest predicate that states the clause: a clause piling up
+many distinct literals on several fields at once may be refused as too large to
+verify, even if it is correct."""
 
 _COMPILE_TASK = """You are compiling a rule written for humans into a small
 predicate program a blockchain can execute deterministically.
@@ -849,7 +1118,6 @@ class CompiledPolicy(gl.Contract):
         fields = self._fields()
         clause_ids = self._clause_ids()
         vector_pairs = self._vector_pairs()
-        seed_payloads = [payload for payload, _ in vector_pairs]
         current_digest = self.program_digest
         prompt_input = _canon(
             {
@@ -871,6 +1139,7 @@ class CompiledPolicy(gl.Contract):
             _validate_program(program, fields, clause_ids)
             program = _canon_program(program)
             _check_vectors(program, vector_pairs)
+            _check_provable(program, fields)
             return _canon(program)
 
         def validate_compilation(leaders_res) -> bool:
@@ -884,6 +1153,7 @@ class CompiledPolicy(gl.Contract):
                 _validate_program(leader_program, fields, clause_ids)
                 leader_program = _canon_program(leader_program)
                 _check_vectors(leader_program, vector_pairs)
+                _check_provable(leader_program, fields)
             except Exception:
                 return False
 
@@ -897,12 +1167,20 @@ class CompiledPolicy(gl.Contract):
             if _kind_signature(leader_program) != _kind_signature(mine):
                 return False
 
-            # 4. Behavioural equivalence over a probe set derived from BOTH
-            #    programs. Two differently shaped but equivalent programs pass;
-            #    a program that is broader or narrower anywhere near a literal
-            #    fails. This is the substantive check -- not a shape check.
-            probes = _probe_payloads(fields, [leader_program, mine], seed_payloads)
-            return _verdict_vector(leader_program, probes) == _verdict_vector(mine, probes)
+            # 4. PROVE behavioural equivalence -- exhaustively, over an
+            #    abstraction that covers every payload the schema admits, not
+            #    over a sample of them. Two differently shaped but equivalent
+            #    programs agree; two that differ anywhere at all do not, and
+            #    "anywhere" here means anywhere.
+            #
+            #    A raise means the abstraction did not fit the resource budget.
+            #    That is a refusal to certify, and it must land on Disagree.
+            #    There is no third branch, and in particular no probe fallback:
+            #    this function returns True only after a completed proof.
+            try:
+                return _prove_equivalent(leader_program, mine, fields)
+            except Exception:
+                return False
 
         agreed = gl.vm.run_nondet_unsafe(compile_once, validate_compilation)
 
@@ -910,6 +1188,7 @@ class CompiledPolicy(gl.Contract):
         program = _canon_program(json.loads(agreed))
         _validate_program(program, fields, clause_ids)
         _check_vectors(program, vector_pairs)
+        _check_provable(program, fields)
         canonical = _canon(program)
         digest = _digest(canonical)
         require(

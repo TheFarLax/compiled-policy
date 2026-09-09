@@ -471,6 +471,47 @@ deploy is evidence.
 
 ---
 
+## Contract sources must be pure ASCII, including comments
+
+**Symptom.** After the equivalence rewrite, every integration test failed at
+deploy with `ValueError: Failed to get schema from all clients (default, hosted
+studio, and local)`. The deploy transaction itself succeeded — the address was
+returned, and `gen_getContractSchema` on that address answered correctly over
+plain HTTP — so the contract was on chain and loadable. Only the harness was
+broken, and its error message named none of the three underlying causes.
+
+**Cause.** `gltest`'s `ContractFactory._get_schema_with_fallback` swallows the
+real exception from each client and reports only that all three failed. Forcing
+the underlying error out revealed:
+
+```
+UnicodeEncodeError: 'ascii' codec can't encode character 'İ'
+                    in position 9903: ordinal not in range(128)
+```
+
+`genlayer_py.contracts.actions.get_contract_schema_for_code` hex-encodes the
+source with `eth_utils.encode_hex`, which encodes a `str` as ASCII. One
+non-ASCII character anywhere in the file is fatal. The character was `U+0130` in
+a **comment** — the worked example for why `len` cannot be proven, since it is a
+letter whose lowercase form is two code points.
+
+Two lesser traps found while chasing it: the Studio endpoint returns **HTTP 403**
+to a bare `Python-urllib` User-Agent, so a hand-rolled probe can look like a
+server-side outage when it is a WAF; and
+`get_contract_schema_for_code` raises "not supported on this network" for any
+chain that is not localnet, so on Studionet the *default* client never
+contributes and the whole path depends on the hosted-studio fallback.
+
+**How to apply.** Keep `contracts/*.py` pure ASCII, comments included. Write
+`U+0130` rather than the character itself.
+`test_contract_sources_are_pure_ascii` enforces this in direct mode, where it
+costs milliseconds, instead of leaving it to a 40-second integration failure with
+a misleading message. When `gltest` reports "failed to get schema from all
+clients", call `get_contract_schema_for_code` directly to see the real
+exception — the harness will not show it to you.
+
+---
+
 ## Direct-mode SDK resolution has to be pinned explicitly
 
 **Problem.** `gltest`'s direct runner resolves the SDK from the latest GitHub
@@ -512,8 +553,8 @@ that extraction and classification decisions need comparative agreement on the
 substantive result, and admitting a compilation is exactly that. Second, and more
 decisive: equivalence of two predicate programs is a question that can be settled
 by **executing them**, so handing it to an LLM would be throwing away a
-deterministic answer. The validator compiles independently and compares verdict
-vectors instead.
+deterministic answer. The validator compiles independently and proves the two
+programs equivalent instead.
 
 **Consequence.** The comparison logic is deterministic code, not a principle
 string. It is unit-testable, it cannot hallucinate, and it does not depend on the
@@ -541,21 +582,83 @@ exists for, and there is a test named after it.
 
 ---
 
-## Probe construction, and its honest limit
+## Probing was replaced by an exact proof
 
-The differential comparison needs a probe set both nodes compute identically. It
-is built from: the declared acceptance-vector payloads; the zero payload; a
-one-field-at-a-time sweep over every literal harvested from **both** programs
-(integers contribute `v-1, v, v+1`; strings contribute themselves and a near-miss;
-`len` bounds contribute strings that straddle them; bools contribute both values);
-and a lockstep sweep that advances all fields together so conjunctions are
-exercised. Ordering is fixed and the set is capped at 96.
+**What was there.** The differential comparison built a probe set from the
+literals of both programs — integers contributed `v-1, v, v+1`, strings
+themselves and a near-miss, `len` bounds strings that straddled them — swept one
+field at a time plus a lockstep pass, capped at 96 payloads, and compared the
+resulting verdict vectors. It was documented as bounded testing rather than a
+proof.
 
-**Limit, stated plainly.** This is bounded testing, not a proof. Two programs that
-differ only on a combination no probe reaches are treated as equivalent. The
-one-field-at-a-time sweep in particular is weak against differences that need two
-fields to move at once, which is why the lockstep sweep exists — but it is not a
-substitute for exhaustive checking, which is impossible in general.
+**Why it was rejected.** A Portal review put the objection precisely: *different
+programs can agree on every sampled payload and still return conflicting results
+for an untested combination*. That is not a hypothetical.
+`tests/proof/test_reviewer_objection.py` keeps a verbatim copy of the deleted
+generator and runs it: for `word_count >= 200` against `word_count >= 200 and
+word_count != 300`, it produced 18 probes and identical verdict vectors. It did
+try `word_count == 300`, twice — but only with `has_tests: false`, where another
+clause already forced `FAIL` and hid the difference. Widening the probe set was
+not the fix, because the sampling strategy never paired the interesting value
+with the field values that expose it.
+
+The second specimen in that file is worse and settles the design question: a
+clause widened only where another clause already fails produces an identical
+whole-program verdict on **every** payload in existence. No verdict-vector
+comparison of any size could catch it. The comparison therefore had to move from
+whole-program verdicts to per-clause satisfaction.
+
+**What replaced it.** An exact finite abstraction, per clause id, over the fields
+both clauses mention:
+
+- **bool** — the domain *is* `{True, False}`. Both enumerated.
+- **int** — every int atom is `x rel k` or `x in K`, so its truth depends only on
+  the sign of `x - k` for each mentioned constant `k`. The sign patterns
+  partition ℤ into: below the minimum, each constant, each non-empty open gap,
+  above the maximum. Every cell is non-empty; one representative from each.
+- **str** — `cmp` eq/ne, `in` and `contains` all read `_norm(x)` and nothing
+  else, so a string's behaviour is fixed by *(which normalised literal it equals,
+  which mentioned patterns are substrings of it)*. Literal classes are
+  represented by the literal itself, deduplicated by normalised form. Non-literal
+  classes are indexed by the **substring-closed** subsets of the pattern set —
+  `{abc}` without `{ab}` is unrealisable and is not invented. Each witness is
+  built by joining the subset's maximal elements with a separator character that
+  occurs in no pattern, so nothing can straddle a join, and is then **executed
+  and checked** to realise exactly its intended class.
+
+The Cartesian product covers every payload the schema admits, so executing both
+clauses on every element and finding no disagreement *is* a proof of agreement
+everywhere — for the declared grammar, and claiming nothing beyond it.
+
+**`len` was removed rather than grandfathered.** It read the raw string while
+every other string operator reads the normalised one, which breaks the "behaviour
+is fixed by `_norm(x)`" property the string classes rest on. Unicode makes it
+concrete: `str.lower()` is not length-preserving (`'İ'.lower()` is two code
+points), so raw length and normalised content cannot share one set of
+representatives. Sampling around length bounds concealed that; a proof cannot.
+The operator went rather than the completeness claim.
+
+**Fail closed, with no third branch.** `_MAX_STATES_PER_CLAUSE = 2048` and
+`_MAX_STATES_TOTAL = 16384` are resource limits, never accuracy limits. Exceeding
+one raises the contract's own `[LLM_ERROR]`, which lands on Disagree in the
+validator and on a clean revert in the leader. `validate_compilation` returns
+`True` only after a completed proof; there is no path from "too big to prove" to
+"accepted", and no sampling code left to fall back to —
+`test_no_probe_fallback_exists_in_the_contract` asserts the deleted symbols never
+return.
+
+**Verified, not asserted.** The completeness claim is checked against brute force
+rather than argued: 660 random clause pairs, biased towards near-misses, each
+decided both by the prover and by enumerating 7,678 concrete payloads with the
+contract's own `_clause_satisfied` — 193 equivalent, 467 different, zero false
+accepts and zero false rejects. Six deliberate mutations of the verifier
+(`tools/mutation_check.py`) are all caught.
+
+**Honest limit.** The proof is exhaustive *for this grammar*, not for programs in
+general, and its completeness is a property of these operators reading only a
+declared field's value. Adding an operator means extending the abstraction first.
+A legal, correct program can also exceed the state budget and be refused — that
+is the fail-closed side of the same rule.
 
 ---
 
@@ -639,10 +742,17 @@ recorded in that entry; what remains open is below.
 - **Practical prompt/criteria size ceiling** on this runner. Unpublished, and the
   compile prompt embeds the full rule, schema and acceptance vectors, so a large
   rule could hit an undocumented limit.
-- **Probe-set adequacy.** Behavioural equivalence is checked on at most 96
-  deterministic probes. Two programs differing only on a combination no probe
-  reaches would be treated as equivalent. This is a designed bound, not an
-  oversight, but it is unquantified.
+- **The equivalence proof has one live data point, not a rate.** A 6/6 Studionet
+  suite (308s, real model, real validator set) admitted a real compilation
+  through the exhaustive gate, so the prover demonstrably accepts real model
+  output on this rule. What remains unquantified is operational, not logical:
+  how *often* two independent compilations of an arbitrary rule are provably
+  equivalent, and whether the state budget is generous enough for the programs a
+  model emits for a larger rule. The failure mode if not is a refused
+  compilation, never a bad admission.
+- **Proof scope.** Exhaustive for `and`/`or`/`not`, `cmp`, `in`, `contains` over
+  `int`/`str`/`bool`. Not a claim about program equivalence in general, and not
+  transferable to an operator added later without extending the abstraction.
 - **`response_format="json"` under `prompt_comparative`.** Not used here; there are
   third-party reports of it misbehaving in that combination specifically. Unresolved
   and irrelevant to this contract.

@@ -23,7 +23,9 @@ RULE_PROMPT = r"ruling on the clauses"
 TONE_CLAUSE = CLAUSES[3]
 
 # Clause 4 mechanised instead of residual, so the "nothing to adjudicate" branch
-# is reachable. Still satisfies every acceptance vector.
+# is reachable. Still satisfies every acceptance vector. (A crude stand-in for
+# the tone clause -- deliberately so; mechanising it is what the residual branch
+# exists to avoid.)
 FULLY_MECHANISED = {
     "clauses": FAITHFUL["clauses"][:3]
     + [
@@ -31,7 +33,7 @@ FULLY_MECHANISED = {
             "id": "4",
             "kind": "mechanised",
             "effect": "require",
-            "predicate": {"op": "len", "field": "body", "rel": "ge", "value": 1},
+            "predicate": {"op": "contains", "field": "body", "value": "a"},
         }
     ]
 }
